@@ -124,7 +124,7 @@ public class GlobalStrategyManager{
             }else if(remoteForeground){
                 // V2: Sector is actively simulated by a detached guest; project guest's live telemetry.
                 planetLastSynced.remove(sector.id);
-                remoteBridge.applyRemoteProfile(planet.name, sector.id, profile, legacyPads);
+                remoteBridge.applyRemoteProfile(profile, planet.name, sector.id, nowMs);
             }else if(sector.hasBase()){
                 // Reconcile any external changes to sector.info.items (tech tree, launch loadout, legacy pads)
                 HashMap<String, Integer> prevSynced = planetLastSynced.get(sector.id);
