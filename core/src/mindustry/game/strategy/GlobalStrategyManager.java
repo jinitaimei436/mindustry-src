@@ -1,6 +1,8 @@
 package mindustry.game.strategy;
 
+import arc.util.*;
 import mindustry.game.*;
+import mindustry.game.coop.*;
 import mindustry.game.strategy.core.*;
 import mindustry.gen.*;
 import mindustry.type.*;
@@ -62,6 +64,9 @@ public class GlobalStrategyManager{
         HashMap<Integer, HashMap<String, Integer>> planetLastSynced =
             lastSyncedStorage.computeIfAbsent(planet.name, k -> new HashMap<>());
         boolean legacyPads = planet.campaignRules.legacyLaunchPads;
+        RemoteSectorBridge remoteBridge = MultiSectorCoordinator.get().strategyBridge;
+        long nowMs = Time.millis();
+        boolean isHost = net != null && net.server();
 
         // 1. Sync sector profiles, reconcile external storage changes, and build active routes
         for(Sector sector : planet.sectors){
@@ -76,16 +81,18 @@ public class GlobalStrategyManager{
             }
 
             SectorStrategyProfile profile = ensureProfile(sector);
+            boolean localForeground = sector.isBeingPlayed();
+            boolean remoteForeground = !localForeground && isHost && remoteBridge.isRemoteForegroundActive(planet.name, sector.id, nowMs);
             profile.hasBase = sector.hasBase();
             profile.enemyBase = sector.hasEnemyBase();
             profile.underAttack = sector.isAttacked();
-            profile.foregroundActive = sector.isBeingPlayed();
+            profile.foregroundActive = localForeground || remoteForeground;
             profile.storageCapacity = sector.info.storageCapacity;
             profile.defaultDestinationSectorId = sector.info.destination != null ? sector.info.destination.id : -1;
             profile.requireExplicitImportDemand = false;
             profile.foregroundExportRates.clear();
 
-            if(profile.foregroundActive){
+            if(localForeground){
                 // Foreground sector runs natively; sync live storage from active core (including zeroes)
                 planetLastSynced.remove(sector.id);
                 CoreBuild core = state.rules.defaultTeam != null ? state.rules.defaultTeam.core() : null;
@@ -114,6 +121,10 @@ public class GlobalStrategyManager{
                 }
                 // In legacyLaunchPads mode: vanilla LaunchPad calls destsec.addItems() directly on launch
                 // (absorbed by external delta reconciliation below), so foregroundExportRates stays empty.
+            }else if(remoteForeground){
+                // V2: Sector is actively simulated by a detached guest; project guest's live telemetry.
+                planetLastSynced.remove(sector.id);
+                remoteBridge.applyRemoteProfile(planet.name, sector.id, profile, legacyPads);
             }else if(sector.hasBase()){
                 // Reconcile any external changes to sector.info.items (tech tree, launch loadout, legacy pads)
                 HashMap<String, Integer> prevSynced = planetLastSynced.get(sector.id);
@@ -133,22 +144,24 @@ public class GlobalStrategyManager{
 
             engine.putSector(profile);
 
-            // Sync default route from SectorInfo.destination
+            // Sync default route from SectorInfo.destination (or remote destination override)
             engine.clearRoutesFrom(sector.id);
-            if(sector.hasBase() && sector.info.destination != null && sector.info.destination != sector && sector.info.destination.planet == planet){
+            int destId = profile.defaultDestinationSectorId;
+            Sector destSector = (destId >= 0 && destId < planet.sectors.size) ? planet.sectors.get(destId) : sector.info.destination;
+            if(sector.hasBase() && destSector != null && destSector != sector && destSector.planet == planet){
                 if(profile.foregroundActive){
-                    if(!legacyPads && !profile.foregroundExportRates.isEmpty()){
+                    if((!legacyPads || remoteForeground) && !profile.foregroundExportRates.isEmpty()){
                         float fgCap = 0f;
                         for(float v : profile.foregroundExportRates.values()) fgCap += v;
                         if(fgCap > 1e-4f){
-                            engine.addRoute(new LogisticsRoute(sector.id, sector.info.destination.id, "*", fgCap));
+                            engine.addRoute(new LogisticsRoute(sector.id, destSector.id, "*", fgCap));
                         }
                     }
                 }else{
                     // Default to 0f so sectors without LaunchPads never receive phantom export capacity
                     float cap = profile.exportCapacities.getOrDefault("*", 0f);
                     if(cap > 1e-4f){
-                        engine.addRoute(new LogisticsRoute(sector.id, sector.info.destination.id, "*", cap));
+                        engine.addRoute(new LogisticsRoute(sector.id, destSector.id, "*", cap));
                     }
                 }
             }
@@ -157,7 +170,7 @@ public class GlobalStrategyManager{
         // 2. Step the pure-Java event-driven simulation engine
         engine.step(dtSeconds);
 
-        // 3. Push solved inventory & rates back into Mindustry SectorInfo (and foreground core in legacy mode)
+        // 3. Push solved inventory & rates back into Mindustry SectorInfo (and foreground core / detached guests)
         Sector foregroundSector = null;
         for(Sector sector : planet.sectors){
             if(!sector.hasBase()) continue;
@@ -172,6 +185,18 @@ public class GlobalStrategyManager{
                 }else{
                     profile.foregroundPendingDelivery.clear();
                 }
+                continue;
+            }
+
+            if(isHost && remoteBridge.isRemoteForegroundActive(planet.name, sector.id, nowMs)){
+                flushRemoteForegroundDeliveries(remoteBridge, planet.name, sector.id, profile);
+                // Keep host's SectorInfo item & rate displays roughly in sync for PlanetDialog UI
+                for(Item item : content.items()){
+                    int qty = Math.max(0, Math.min(profile.storageCapacity, Math.round(profile.getStored(item.name))));
+                    sector.info.items.set(item, qty);
+                }
+                syncRatesToExportStat(profile.solvedExportRates, sector.info.export);
+                syncRatesToExportStat(profile.solvedImportRates, sector.info.imports);
                 continue;
             }
 
@@ -196,6 +221,11 @@ public class GlobalStrategyManager{
         // Immediately refresh foreground LandingPad import rate cache so background export changes take effect now
         if(foregroundSector != null && !legacyPads){
             foregroundSector.info.refreshImportRates(planet);
+        }
+
+        // Push queued cross-sector logistics deliveries to detached guests
+        if(isHost){
+            MultiSectorCoordinator.get().flushRemoteLogisticsDeliveries();
         }
     }
 
@@ -239,6 +269,25 @@ public class GlobalStrategyManager{
             if(toAdd > 0){
                 core.items.add(item, toAdd);
             }
+            float remainder = pending - whole;
+            if(remainder <= 1e-5f){
+                it.remove();
+            }else{
+                entry.setValue(remainder);
+            }
+        }
+    }
+
+    private void flushRemoteForegroundDeliveries(RemoteSectorBridge bridge, String planetName, int sectorId, SectorStrategyProfile profile){
+        if(profile.foregroundPendingDelivery.isEmpty()) return;
+        Iterator<Map.Entry<String, Float>> it = profile.foregroundPendingDelivery.entrySet().iterator();
+        while(it.hasNext()){
+            Map.Entry<String, Float> entry = it.next();
+            float pending = entry.getValue();
+            int whole = (int)Math.floor(pending);
+            if(whole <= 0) continue;
+
+            bridge.queueDelivery(planetName, sectorId, entry.getKey(), whole);
             float remainder = pending - whole;
             if(remainder <= 1e-5f){
                 it.remove();

@@ -21,6 +21,7 @@ import mindustry.game.EventType.*;
 import mindustry.game.Objectives.*;
 import mindustry.game.Saves.*;
 import mindustry.game.Teams.*;
+import mindustry.game.coop.*;
 import mindustry.gen.*;
 import mindustry.input.*;
 import mindustry.io.*;
@@ -434,10 +435,23 @@ public class Control implements ApplicationListener, Loadable{
     }
 
     void playSector(@Nullable Sector origin, Sector sector, WorldReloader reloader){
+        if(net.server()){
+            MultiSectorCoordinator.get().requestHostSwitchSector(sector, () -> playSectorInternal(origin, sector, reloader));
+        }else{
+            playSectorInternal(origin, sector, reloader);
+        }
+    }
+
+    private void playSectorInternal(@Nullable Sector origin, Sector sector, WorldReloader reloader){
         ui.loadAnd(() -> {
+            Sector prevSector = state.hasSector() ? state.getSector() : null;
             if(saves.getCurrent() != null && state.isGame()){
                 control.saves.getCurrent().save();
                 control.saves.resetSave();
+            }
+
+            if(net.server()){
+                MultiSectorCoordinator.get().onHostLeavingSector(prevSector, sector);
             }
 
             if(sector.preset != null){
@@ -550,6 +564,9 @@ public class Control implements ApplicationListener, Loadable{
                         Events.fire(new RulesLoadEvent(state.rules, true));
                         state.set(State.playing);
                         reloader.end();
+                        if(net.server()){
+                            MultiSectorCoordinator.get().onHostEnteredSector(sector);
+                        }
                     }
 
                 }catch(SaveException e){
@@ -589,6 +606,9 @@ public class Control implements ApplicationListener, Loadable{
         Events.fire(Trigger.newGame);
         reloader.end();
         state.set(State.playing);
+        if(net.server()){
+            MultiSectorCoordinator.get().onHostEnteredSector(sector);
+        }
     }
 
     public boolean isHighScore(){
@@ -597,8 +617,11 @@ public class Control implements ApplicationListener, Loadable{
 
     @Override
     public void dispose(){
+        if(net.isDetachedClient()){
+            MultiSectorCoordinator.get().flushBeforeClientDisconnect();
+        }
         //try to save when exiting
-        if(saves != null && saves.getCurrent() != null && saves.getCurrent().isAutosave() && !net.client() && !state.isMenu() && !state.gameOver){
+        if(saves != null && saves.getCurrent() != null && saves.getCurrent().isAutosave() && !net.isConnectedClient() && !state.isMenu() && !state.gameOver){
             try{
                 SaveIO.save(control.saves.getCurrent().file);
                 settings.forceSave();
@@ -617,7 +640,7 @@ public class Control implements ApplicationListener, Loadable{
 
     @Override
     public void pause(){
-        if(settings.getBool("backgroundpause", true) && !net.active() && !state.rules.pauseDisabled){
+        if(settings.getBool("backgroundpause", true) && !net.active() && !state.isPauseLocked()){
             backgroundPaused = true;
             wasPaused = state.is(State.paused);
             if(state.is(State.playing)) state.set(State.paused);
@@ -626,7 +649,7 @@ public class Control implements ApplicationListener, Loadable{
 
     @Override
     public void resume(){
-        if(state.is(State.paused) && !wasPaused && settings.getBool("backgroundpause", true) && !net.active() && !state.rules.pauseDisabled){
+        if(state.is(State.paused) && !wasPaused && settings.getBool("backgroundpause", true) && !net.active() && !state.isPauseLocked()){
             state.set(State.playing);
         }
         backgroundPaused = false;
@@ -722,7 +745,7 @@ public class Control implements ApplicationListener, Loadable{
                 core.items.each((i, a) -> i.unlock());
             }
 
-            if(backgroundPaused && settings.getBool("backgroundpause") && !net.active() && !state.rules.pauseDisabled){
+            if(backgroundPaused && settings.getBool("backgroundpause") && !net.active() && !state.isPauseLocked()){
                 state.set(State.paused);
             }
 
@@ -731,15 +754,15 @@ public class Control implements ApplicationListener, Loadable{
                 state.set(State.playing);
             }
 
-            if(!net.client() && Core.input.keyTap(Binding.pause) && !(state.isCampaign() && state.afterGameOver) && !renderer.isCutscene() && !scene.hasDialog() && !scene.hasKeyboard() && !ui.restart.isShown() && (state.is(State.paused) || state.is(State.playing))){
-                if(state.rules.pauseDisabled){
+            if(Core.input.keyTap(Binding.pause) && !(state.isCampaign() && state.afterGameOver) && !renderer.isCutscene() && !scene.hasDialog() && !scene.hasKeyboard() && !ui.restart.isShown() && (state.is(State.paused) || state.is(State.playing))){
+                if(state.isPauseLocked()){
                     ui.hudfrag.showPauseDisabled();
-                }else{
+                }else if(!net.client()){
                     state.set(state.isPaused() ? State.playing : State.paused);
                 }
             }
 
-            if(state.isCampaign() && state.afterGameOver){
+            if(state.isCampaign() && state.afterGameOver && !state.isPauseLocked()){
                 state.set(State.paused);
             }
 
@@ -748,7 +771,7 @@ public class Control implements ApplicationListener, Loadable{
                     ui.chatfrag.hide();
                 }else if(!ui.paused.isShown() && !scene.hasDialog()){
                     ui.paused.show();
-                    if(!net.active() && !state.rules.pauseDisabled){
+                    if(!net.active() && !state.isPauseLocked()){
                         state.set(State.paused);
                     }
                 }

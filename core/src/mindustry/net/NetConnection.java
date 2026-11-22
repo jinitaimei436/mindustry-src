@@ -3,6 +3,7 @@ package mindustry.net;
 import arc.struct.*;
 import arc.util.*;
 import mindustry.entities.units.*;
+import mindustry.game.coop.*;
 import mindustry.gen.*;
 import mindustry.net.Packets.*;
 
@@ -35,9 +36,15 @@ public abstract class NetConnection{
     //TODO: refactor to state enum
     public boolean hasConnected, hasBegunConnecting, determiningAssets, receivingAssets, hasDisconnected;
     public float viewWidth, viewHeight, viewX, viewY;
+    /** V2 multi-sector campaign mode for this client connection. */
+    public ClientSectorMode sectorMode = ClientSectorMode.CO_LOCATED;
 
     public NetConnection(String address){
         this.address = address;
+    }
+
+    public boolean isCoLocated(){
+        return sectorMode == ClientSectorMode.CO_LOCATED;
     }
 
     /** Kick with the standard kick reason. */

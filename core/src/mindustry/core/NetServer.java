@@ -17,6 +17,7 @@ import mindustry.entities.units.*;
 import mindustry.game.*;
 import mindustry.game.EventType.*;
 import mindustry.game.Teams.*;
+import mindustry.game.coop.*;
 import mindustry.gen.*;
 import mindustry.graphics.*;
 import mindustry.io.TypeIO.*;
@@ -325,6 +326,7 @@ public class NetServer implements ApplicationListener{
         });
 
         registerCommands();
+        MultiSectorCoordinator.get().init();
     }
 
     public void sendWorldAndAssets(Player player){
@@ -632,6 +634,7 @@ public class NetServer implements ApplicationListener{
 
         player.remove();
         player.con.hasDisconnected = true;
+        MultiSectorCoordinator.get().onGuestDisconnected(player);
     }
 
     //these functions are for debugging only, and will be removed!
@@ -720,7 +723,10 @@ public class NetServer implements ApplicationListener{
         netServer.dataStreamWrites.s(build.block.id);
         build.writeSync(netServer.dataStreamWrites);
 
-        Call.blockSnapshot((short)1, netServer.syncStream.toByteArray());
+        byte[] data = netServer.syncStream.toByteArray();
+        for(NetConnection con : netServer.coLocatedConnections()){
+            Call.blockSnapshot(con, (short)1, data);
+        }
         netServer.syncStream.reset();
     }
 
@@ -767,7 +773,7 @@ public class NetServer implements ApplicationListener{
         float viewX, float viewY, float viewWidth, float viewHeight
     ){
         NetConnection con = player.con;
-        if(con == null || snapshotID < con.lastReceivedClientSnapshot) return;
+        if(con == null || !con.isCoLocated() || snapshotID < con.lastReceivedClientSnapshot) return;
 
         //validate coordinates just in case
         if(invalid(x)) x = 0f;
@@ -1018,6 +1024,7 @@ public class NetServer implements ApplicationListener{
         }
 
         Events.fire(new PlayerJoin(player));
+        MultiSectorCoordinator.get().onGuestJoined(player);
 
         //plugins may have kicked the player immediately in PlayerJoinEvent, so don't respawn if that happens
         if(!player.con.kicked){
@@ -1057,7 +1064,7 @@ public class NetServer implements ApplicationListener{
             if(state.rules.pvp && state.rules.pvpAutoPause){
                 boolean waiting = isWaitingForPlayers(), paused = state.isPaused();
                 if(waiting != paused){
-                    if(waiting){
+                    if(waiting && !state.isPauseLocked()){
                         //is now waiting, enable pausing, flag it correctly
                         pvpAutoPaused = true;
                         state.set(State.paused);
@@ -1099,8 +1106,22 @@ public class NetServer implements ApplicationListener{
         }
     }
 
-    /** Sends a block snapshot to all players. */
+    /** Returns all connected guest connections currently co-located in the host's active sector. */
+    public Seq<NetConnection> coLocatedConnections(){
+        tempConnections.clear();
+        for(NetConnection con : net.getConnections()){
+            if(con != null && con.hasConnected && con.isConnected() && con.isCoLocated()){
+                tempConnections.add(con);
+            }
+        }
+        return tempConnections;
+    }
+
+    /** Sends a block snapshot to all co-located players. */
     public void writeBlockSnapshots() throws IOException{
+        Seq<NetConnection> targets = coLocatedConnections();
+        if(targets.isEmpty()) return;
+
         syncStream.reset();
 
         short sent = 0;
@@ -1114,7 +1135,10 @@ public class NetServer implements ApplicationListener{
 
                 if(syncStream.size() > maxSnapshotSize){
                     dataStream.close();
-                    Call.blockSnapshot(sent, syncStream.toByteArray());
+                    byte[] payload = syncStream.toByteArray();
+                    for(NetConnection con : targets){
+                        Call.blockSnapshot(con, sent, payload);
+                    }
                     sent = 0;
                     syncStream.reset();
                 }
@@ -1123,11 +1147,17 @@ public class NetServer implements ApplicationListener{
 
         if(sent > 0){
             dataStream.close();
-            Call.blockSnapshot(sent, syncStream.toByteArray());
+            byte[] payload = syncStream.toByteArray();
+            for(NetConnection con : targets){
+                Call.blockSnapshot(con, sent, payload);
+            }
         }
     }
 
     public void writeStateSnapshot() throws IOException{
+        Seq<NetConnection> targets = coLocatedConnections();
+        if(targets.isEmpty()) return;
+
         byte tps = (byte)Math.min(Core.graphics.getFramesPerSecond(), 255);
         syncStream.reset();
         int activeTeams = (byte)state.teams.present.count(t -> t.cores.size > 0);
@@ -1145,12 +1175,19 @@ public class NetServer implements ApplicationListener{
 
         dataStream.close();
 
-        Call.stateSnapshot(state.wavetime, state.wave, state.enemies, state.isPaused(), state.gameOver,
-        universe.seconds(), tps, GlobalVars.rand.seed0, GlobalVars.rand.seed1, syncStream.toByteArray());
+        byte[] coreData = syncStream.toByteArray();
+        boolean paused = state.isPaused() && !state.isPauseLocked();
+        for(NetConnection con : targets){
+            Call.stateSnapshot(con, state.wavetime, state.wave, state.enemies, paused, state.gameOver,
+            universe.seconds(), tps, GlobalVars.rand.seed0, GlobalVars.rand.seed1, coreData);
+        }
     }
 
     /** Does not check isSyncHidden. Call this if no entities are hidden. */
     public void writeEntitySnapshotsAll() throws IOException{
+        Seq<NetConnection> targets = coLocatedConnections();
+        if(targets.isEmpty()) return;
+
         syncStream.reset();
 
         int sent = 0;
@@ -1162,7 +1199,7 @@ public class NetServer implements ApplicationListener{
 
             if(syncStream.size() > maxSnapshotSize){
                 dataStream.close();
-                Call.entitySnapshot((short)sent, syncStream.toByteArray());
+                sendEntitySnapshots(targets, (short)sent, syncStream.toByteArray());
                 sent = 0;
                 syncStream.reset();
             }
@@ -1171,7 +1208,7 @@ public class NetServer implements ApplicationListener{
         if(sent > 0){
             dataStream.close();
 
-            Call.entitySnapshot((short)sent, syncStream.toByteArray());
+            sendEntitySnapshots(targets, (short)sent, syncStream.toByteArray());
         }
     }
 
@@ -1325,7 +1362,7 @@ public class NetServer implements ApplicationListener{
                     //Serialize by teams
                     for(Team team : Team.all){ //Not Teams.active, because players can be on inactive teams
                         var tdata = team.data();
-                        playersToSend.selectFrom(tdata.players, p -> !p.isLocal() && p.con.hasConnected);
+                        playersToSend.selectFrom(tdata.players, p -> !p.isLocal() && p.con != null && p.con.hasConnected && p.con.isCoLocated());
                         if(!playersToSend.isEmpty()){
                             writeEntitySnapshotsTeam(team, playersToSend);
                         }
@@ -1337,7 +1374,7 @@ public class NetServer implements ApplicationListener{
 
                 //write custom player-specific entities (usually labels)
                 for(Player player : Groups.player){
-                    if(player.con != null && player.con.hasConnected && player.con.localEntities.size > 0){
+                    if(player.con != null && player.con.hasConnected && player.con.isCoLocated() && player.con.localEntities.size > 0){
                         writeCustomEntitySnapshot(player, player.con.localEntities);
                     }
                 }
@@ -1349,28 +1386,35 @@ public class NetServer implements ApplicationListener{
             }
 
             if(Groups.player.size() > 0 && buildHealthChanged.size > 0 && healthSyncTime.poll()){
-                healthSeq.clear();
+                Seq<NetConnection> targets = coLocatedConnections();
+                if(!targets.isEmpty()){
+                    healthSeq.clear();
 
-                var iter = buildHealthChanged.iterator();
-                while(iter.hasNext){
-                    int next = iter.next();
-                    var build = world.build(next);
+                    var iter = buildHealthChanged.iterator();
+                    while(iter.hasNext){
+                        int next = iter.next();
+                        var build = world.build(next);
 
-                    //pack pos + health into update list
-                    if(build != null){
-                        healthSeq.add(next, Float.floatToRawIntBits(build.health));
+                        //pack pos + health into update list
+                        if(build != null){
+                            healthSeq.add(next, Float.floatToRawIntBits(build.health));
+                        }
+
+                        //if size exceeds snapshot limit, send it out and begin building it up again
+                        if(healthSeq.size * 4 >= maxSnapshotSize){
+                            for(NetConnection con : targets){
+                                Call.buildHealthUpdate(con, healthSeq);
+                            }
+                            healthSeq.clear();
+                        }
                     }
 
-                    //if size exceeds snapshot limit, send it out and begin building it up again
-                    if(healthSeq.size * 4 >= maxSnapshotSize){
-                        Call.buildHealthUpdate(healthSeq);
-                        healthSeq.clear();
+                    //send any residual health updates
+                    if(healthSeq.size > 0){
+                        for(NetConnection con : targets){
+                            Call.buildHealthUpdate(con, healthSeq);
+                        }
                     }
-                }
-
-                //send any residual health updates
-                if(healthSeq.size > 0){
-                    Call.buildHealthUpdate(healthSeq);
                 }
 
                 buildHealthChanged.clear();
@@ -1424,9 +1468,9 @@ public class NetServer implements ApplicationListener{
 
     static void clientPlanSnapshotSend(Player player, int groupId, ClientBuildPlans plans){
 
-        //only send to others of the same team
+        //only send to others of the same team in the same sector
         for(Player other : player.team().data().players){
-            if(other != player && !other.isLocal() && other.con != null && other.con.isConnected()){
+            if(other != player && !other.isLocal() && other.con != null && other.con.isConnected() && other.con.isCoLocated()){
                 Call.clientPlanSnapshotReceived(other.con, player, groupId, plans);
             }
         }

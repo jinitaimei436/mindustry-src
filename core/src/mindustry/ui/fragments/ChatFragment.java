@@ -16,6 +16,7 @@ import arc.util.*;
 import mindustry.*;
 import mindustry.core.*;
 import mindustry.game.EventType.*;
+import mindustry.game.coop.*;
 import mindustry.gen.*;
 import mindustry.input.*;
 import mindustry.ui.*;
@@ -233,7 +234,11 @@ public class ChatFragment extends Table{
 
         Events.fire(new ClientChatEvent(message));
 
-        Call.sendChatMessage(message);
+        if(net.isDetachedClient()){
+            MultiSectorCoordinator.get().sendDetachedChatMessage(message);
+        }else{
+            Call.sendChatMessage(message);
+        }
     }
 
     public void toggle(){

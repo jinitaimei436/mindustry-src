@@ -11,6 +11,9 @@ import arc.scene.ui.layout.*;
 import arc.struct.*;
 import arc.util.*;
 import mindustry.game.*;
+import mindustry.game.coop.*;
+import mindustry.game.coop.CampaignPermissions.*;
+import mindustry.game.coop.SectorOccupancy.*;
 import mindustry.gen.*;
 import mindustry.graphics.*;
 import mindustry.net.*;
@@ -48,7 +51,10 @@ public class PlayerListFragment{
             });
 
             cont.table(Tex.buttonTrans, pane -> {
-                pane.label(() -> Core.bundle.format(Groups.player.size() == 1 ? "players.single" : "players", Groups.player.size()));
+                pane.label(() -> {
+                    int total = net.active() ? Math.max(Groups.player.size(), MultiSectorCoordinator.get().getTotalOnlinePlayers()) : Groups.player.size();
+                    return Core.bundle.format(total == 1 ? "players.single" : "players", total);
+                });
                 pane.row();
 
                 search = pane.field(null, text -> rebuild()).grow().pad(8).name("search").maxTextLength(maxNameLength).get();
@@ -62,8 +68,8 @@ public class PlayerListFragment{
                     menu.defaults().growX().height(50f).fillY();
                     menu.name = "menu";
 
-                    menu.button("@server.bans", ui.bans::show).disabled(b -> net.client());
-                    menu.button("@server.admins", ui.admins::show).disabled(b -> net.client());
+                    menu.button("@server.bans", ui.bans::show).disabled(b -> net.isConnectedClient());
+                    menu.button("@server.admins", ui.admins::show).disabled(b -> net.isConnectedClient());
                     menu.button("@close", this::toggle);
                 }).margin(0f).pad(10f).growX();
 
@@ -82,7 +88,11 @@ public class PlayerListFragment{
         boolean found = false;
 
         players.clear();
-        Groups.player.copy(players);
+        if(net.server() && state.isCampaign()){
+            players.addAll(MultiSectorCoordinator.get().getAllConnectedPlayers());
+        }else{
+            Groups.player.copy(players);
+        }
 
         players.sort(Structs.comps(Structs.comparing(Player::team), Structs.comparingBool(p -> !p.admin)));
         if(search.getText().length() > 0){
@@ -93,7 +103,7 @@ public class PlayerListFragment{
             found = true;
             NetConnection connection = user.con;
 
-            if(connection == null && net.server() && !user.isLocal()) return;
+            if(connection == null && net.server() && !user.isLocal()) continue;
 
             Table button = new Table();
             button.left();
@@ -132,7 +142,16 @@ public class PlayerListFragment{
             });
 
             button.add(iconTable).size(h);
-            button.add("[#" + user.color().toString().toUpperCase() + "]" + user.name()).style(Styles.outlineLabel).growX().wrap(true).pad(10);
+            String sectorTag = "";
+            if(state.isCampaign() && net.active()){
+                PlayerPresence pres = MultiSectorCoordinator.get().occupancy.getPresence(user.uuid());
+                if(pres != null && pres.sectorId >= 0){
+                    sectorTag = pres.mode == ClientSectorMode.DETACHED_LOCAL
+                        ? " [gold](独立区块 #" + pres.sectorId + ")"
+                        : " [lightgray](区块 #" + pres.sectorId + ")";
+                }
+            }
+            button.add("[#" + user.color().toString().toUpperCase() + "]" + user.name() + sectorTag).style(Styles.outlineLabel).growX().wrap(true).pad(10);
 
             button.background(Tex.underline);
 
@@ -212,7 +231,7 @@ public class PlayerListFragment{
                                 }).row();
                             }
 
-                            if(!net.client() && !user.isLocal()){
+                            if(!net.isConnectedClient() && !user.isLocal()){
                                 t.button("@player.admin", Icon.admin, Styles.togglet, () -> {
                                     dialog.hide();
                                     String id = user.uuid();
@@ -221,14 +240,39 @@ public class PlayerListFragment{
                                         ui.showConfirm("@confirm", Core.bundle.format("confirmunadmin",  user.name()), () -> {
                                             netServer.admins.unAdminPlayer(id);
                                             user.admin = false;
+                                            MultiSectorCoordinator.get().broadcastPermissions();
                                         });
                                     }else{
                                         ui.showConfirm("@confirm", Core.bundle.format("confirmadmin",  user.name()), () -> {
                                             netServer.admins.adminPlayer(id, user.usid());
                                             user.admin = true;
+                                            MultiSectorCoordinator.get().broadcastPermissions();
                                         });
                                     }
                                 }).checked(b -> user.admin).row();
+
+                                if(net.server() && state.isCampaign()){
+                                    String targetUuid = user.uuid();
+                                    CampaignPermissions perms = MultiSectorCoordinator.get().permissions;
+                                    t.image(Tex.whiteui, Pal.accent).fillX().height(2f).padTop(6f).padBottom(4f).row();
+                                    t.add("[accent]房客独立权限").height(28f).row();
+                                    t.check("允许切换区块", perms.canSwitchSector(targetUuid, false), val -> {
+                                        perms.getOrCreateOverride(targetUuid).allowSectorSwitch = val;
+                                        MultiSectorCoordinator.get().broadcastPermissions();
+                                    }).height(36f).left().row();
+                                    t.check("允许发射核心", perms.canLaunchCore(targetUuid, false), val -> {
+                                        perms.getOrCreateOverride(targetUuid).allowCoreLaunch = val;
+                                        MultiSectorCoordinator.get().broadcastPermissions();
+                                    }).height(36f).left().row();
+                                    t.check("允许研究科技", perms.canResearch(targetUuid, false), val -> {
+                                        perms.getOrCreateOverride(targetUuid).allowResearch = val;
+                                        MultiSectorCoordinator.get().broadcastPermissions();
+                                    }).height(36f).left().row();
+                                    t.check("允许放弃区块", perms.canAbandon(targetUuid, false), val -> {
+                                        perms.getOrCreateOverride(targetUuid).allowAbandon = val;
+                                        MultiSectorCoordinator.get().broadcastPermissions();
+                                    }).height(36f).left().row();
+                                }
                             }
                         }).row();
 

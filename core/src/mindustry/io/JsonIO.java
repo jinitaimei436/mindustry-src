@@ -351,13 +351,13 @@ public class JsonIO{
                 json.writeValue("stopWhenOutputsFull", node.stopWhenOutputsFull);
 
                 json.writeObjectStart("inputsPerSec");
-                for(Map.Entry<String, Float> e : node.inputsPerSec.entrySet()){
+                for(java.util.Map.Entry<String, Float> e : node.inputsPerSec.entrySet()){
                     json.writeValue(e.getKey(), e.getValue());
                 }
                 json.writeObjectEnd();
 
                 json.writeObjectStart("outputsPerSec");
-                for(Map.Entry<String, Float> e : node.outputsPerSec.entrySet()){
+                for(java.util.Map.Entry<String, Float> e : node.outputsPerSec.entrySet()){
                     json.writeValue(e.getKey(), e.getValue());
                 }
                 json.writeObjectEnd();
@@ -402,7 +402,7 @@ public class JsonIO{
                 json.writeValue("defaultDestinationSectorId", p.defaultDestinationSectorId);
 
                 json.writeObjectStart("storedItems");
-                for(Map.Entry<String, Float> e : p.storedItems.entrySet()){
+                for(java.util.Map.Entry<String, Float> e : p.storedItems.entrySet()){
                     json.writeValue(e.getKey(), e.getValue());
                 }
                 json.writeObjectEnd();
@@ -414,13 +414,13 @@ public class JsonIO{
                 json.writeArrayEnd();
 
                 json.writeObjectStart("exportCapacities");
-                for(Map.Entry<String, Float> e : p.exportCapacities.entrySet()){
+                for(java.util.Map.Entry<String, Float> e : p.exportCapacities.entrySet()){
                     json.writeValue(e.getKey(), e.getValue());
                 }
                 json.writeObjectEnd();
 
                 json.writeObjectStart("importDemands");
-                for(Map.Entry<String, Float> e : p.importDemands.entrySet()){
+                for(java.util.Map.Entry<String, Float> e : p.importDemands.entrySet()){
                     json.writeValue(e.getKey(), e.getValue());
                 }
                 json.writeObjectEnd();
@@ -432,7 +432,7 @@ public class JsonIO{
                 json.writeArrayEnd();
 
                 json.writeObjectStart("garrisonUnits");
-                for(Map.Entry<String, Integer> e : p.garrisonUnits.entrySet()){
+                for(java.util.Map.Entry<String, Integer> e : p.garrisonUnits.entrySet()){
                     json.writeValue(e.getKey(), e.getValue());
                 }
                 json.writeObjectEnd();

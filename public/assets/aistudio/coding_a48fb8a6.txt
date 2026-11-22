@@ -1,0 +1,134 @@
+11.22 11:07
+coding
+下面这些可以**整段转给上游 AI**。核心结论：**v1.6.1 的 Java 代码和 v1.6 完全一样，问题全部出在打包配置上**。
+---
+# v1.6.1 修复报告（给上游 AI）
+## 一、故障现象
+安装后一打开就闪退，logcat 抓到的堆栈：
+```
+java.lang.AbstractMethodError: abstract method "void arc.Application.addListener(arc.ApplicationListener)"
+    at arc.backend.android.AndroidApplication.init(AndroidApplication.java:112)
+    at arc.backend.android.AndroidApplication.initialize(AndroidApplication.java:70)
+    at mindustry.android.AndroidLauncher.onCreate(AndroidLauncher.java:58)
+```
+设备：vivo V2417A / Android 15 (SDK 35) / arm64。
+## 二、根因（三层，逐层剥）
+1. **直接原因**：`arc.Application` 的 default 方法没有被脱糖（desugar），退化成抽象方法 → `AbstractMethodError`。
+2. **为什么没脱糖**：构建时 `minifyEnabled = false`。**R8 不只做混淆，它还负责 default interface method 的脱糖**。
+   Mindustry 的 `android/build.gradle` 里原本就有注释警告这一点：
+   > `//TODO without these lines (r8 enabled), Mindustry crashes with missing default interface method errors.`
+3. **为什么当初关掉 R8**：AGP 8.2.2 的 bug —— `:android:minifyDebugWithR8` 报
+   `NoSuchFileException: .../merged_java_res/debug/base.jar`。当时用"关掉 R8"绕开，**这是错误决策，是本次事故的唯一原因**。
+> 补充排除了一个误判：不是 Arc 版本混用。构建日志里 `Compiling with localArc`，`:Arc:arc-core` 和 `:Arc:backends:backend-android` 都来自同一个本地构建，没有 jitpack 混装。
+## 三、修复内容
+### 1）构建配置（3 处，全在 CI，不改仓库源码）
+| 改动 | 从 | 到 |
+|---|---|---|
+| Android Gradle Plugin | `8.2.2` | **`8.13.2`** |
+| debug `minifyEnabled` | `false`（错误地 sed 掉） | **恢复 `true`** |
+| debug `shrinkResources` | `false` | **恢复 `true`** |
+AGP 升级是**真正的解法**：`base.jar` 那个 bug 在 8.3+ 已修复，所以完全不需要再关 R8。
+（另外保留了一个 Java 资源文件 `android/src/main/resources/mindustry/fork-version.txt` 作兜底，让 `mergeJavaResource` 不判 NO-SOURCE。）
+### 2）CI 新增脱糖校验（防复发）
+构建完立刻检查 dex 里有没有 `Application$-CC` 伴随类，没有就让构建失败：
+```yaml
+      - name: Verify APK contains desugared companion classes
+        run: |
+          APK=$(ls android/build/outputs/apk/debug/*.apk | head -1)
+          unzip -p "$APK" 'classes*.dex' > /tmp/all.dex
+          if grep -a -q 'Application\$-CC' /tmp/all.dex; then
+            echo 'DESUGAR-OK: companion classes present'
+          else
+            echo 'FATAL: default interface methods were NOT desugared'; exit 1
+          fi
+```
+### 3）源码改动：仅 1 处（这一条 V2 也必须修）
+v1.6.1 相对 v1.6 **Java 代码零改动**。但相对 AI 交付的 1.6 原始代码，装包时修了一个**编译错误**：
+`core/src/mindustry/io/JsonIO.java` 第 **354 / 360 / 405 / 417 / 423 / 435** 行，6 处 `Map.Entry` 有歧义——因为该文件同时 `import mindustry.maps.*;` 和 `import java.util.*;`：
+```java
+// ❌ 原始 1.6 代码，编译报错：reference to Map is ambiguous
+for(Map.Entry<String, Float> e : node.inputsPerSec.entrySet()){
+// ✅ 修复后
+for(java.util.Map.Entry<String, Float> e : node.inputsPerSec.entrySet()){
+```
+> 顺带提醒：1.6 之前的 `GlobalStrategyManager.ensureProfile()` 也有同类 lambda 捕获错误（已在 v1.5 修掉），V2 如果是重新生成代码，注意别再犯。
+## 四、给 V2 的检查清单
+- [ ] **绝对不要**为了让 R8 跑通而关 `minifyEnabled`——那会让 default interface method 不脱糖，启动必崩
+- [ ] AGP 用 **8.13.2**（或任意 ≥ 8.3 的版本），不要用 8.2.2
+- [ ] `packageDebug` 后校验 dex 含 `$-CC` 类
+- [ ] `JsonIO.java` 里的 `Map.Entry` 全部写成 `java.util.Map.Entry`（或删掉 `import mindustry.maps.*`，但先确认该文件是否真的用到 mindustry 的 `Map`）
+- [ ] 每次交付前**至少跑一次 `./gradlew core:compileJava`**（1.6 的 6 处编译错误说明上游没编译过）
+- [ ] 交付后提醒装机方：`arc` 相关崩溃优先看 R8/脱糖配置，而不是业务代码
+## 五、可直接使用的完整 CI 文件
+`.github/workflows/build-apk.yml`：
+```yaml
+name: Build Android APK
+on:
+  push:
+    branches: [ master, main ]
+  workflow_dispatch:
+env:
+  ANDROID_HOME: /usr/local/lib/android/sdk
+  ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read version
+        id: ver
+        run: |
+          if [ -f VERSION ]; then V=$(tr -d '[:space:]' < VERSION); else V=$(git rev-parse --short HEAD); fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: 17
+      - name: Clone Arc dependency
+        run: git clone --depth=1 --branch=master https://github.com/Anuken/Arc ../Arc
+      - name: Install Android SDK packages
+        run: |
+          set -e
+          SDKMANAGER=$(ls -d "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager | head -1)
+          yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
+          "$SDKMANAGER" "platform-tools" "platforms;android-36" "build-tools;36.0.0"
+      # AGP 8.2.2 has a bug: R8 cannot read merged_java_res/base.jar.
+      # Fixed in AGP 8.3+. Do NOT disable R8 as a workaround: it breaks
+      # default-interface-method desugaring and the app crashes on launch.
+      - name: Upgrade Android Gradle Plugin
+        run: sed -i "s#com.android.tools.build:gradle:8.2.2#com.android.tools.build:gradle:8.13.2#" android/build.gradle
+      - name: Provide java resource
+        run: |
+          mkdir -p android/src/main/resources/mindustry
+          echo "build" > android/src/main/resources/mindustry/fork-version.txt
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Build Debug APK
+        run: |
+          chmod +x gradlew
+          ./gradlew android:assembleDebug --stacktrace --no-daemon
+      - name: Verify desugared companion classes
+        run: |
+          APK=$(ls android/build/outputs/apk/debug/*.apk | head -1)
+          unzip -p "$APK" 'classes*.dex' > /tmp/all.dex
+          grep -a -q 'Application\$-CC' /tmp/all.dex && echo DESUGAR-OK || (echo FATAL; exit 1)
+      - name: Rename APK with version
+        run: |
+          mkdir -p out
+          for f in android/build/outputs/apk/debug/*.apk; do cp "$f" "out/mindustry-v${{ steps.ver.outputs.version }}-debug.apk"; done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mindustry-${{ steps.ver.outputs.version }}-debug-apk
+          path: out/*.apk
+          retention-days: 14
+```
+## 六、验证结果（本机实测）
+| 项目 | v1.6（坏） | v1.6.1（修） |
+|---|---|---|
+| dex 数量 | 4 | **2**（R8 生效） |
+| `Application$-CC` 脱糖类 | ❌ 缺失 | ✅ 存在 |
+| 编译 / 单元测试 | ✅ / ✅ | ✅ / ✅ |
+| 启动 |  AbstractMethodError | 待真机确认 |
+---
+最后一句给我自己的提醒也写在这里：**这次事故的教训是"绕开报错不如换掉出 bug 的版本"**。当时关 R8 只花 30 秒，升级 AGP 花 3 分钟，但前者让我们多走了两条弯路。
+

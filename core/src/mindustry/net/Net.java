@@ -31,6 +31,8 @@ public class Net{
     private boolean server;
     private boolean active;
     private boolean clientLoaded;
+    /** V2: When true, client keeps its Host connection alive while running local simulation for a different sector. */
+    private boolean detachedLocalSim;
     private @Nullable StreamBuilder currentStream;
 
     private final Seq<Packet> packetQueue = new Seq<>();
@@ -54,6 +56,8 @@ public class Net{
 
         //register generated packet classes
         Call.registerPackets();
+        //V2 multi-sector campaign multiplayer control & sync packet
+        registerPacket(CampaignPacket::new);
     }
 
     /** Registers a new packet type for serialization. */
@@ -134,7 +138,7 @@ public class Net{
             }
             ui.loadfrag.hide();
 
-            if(client()){
+            if(isConnectedClient()){
                 netClient.disconnectQuietly();
             }
         }
@@ -176,6 +180,7 @@ public class Net{
                 provider.connectClient(ip, port, success);
                 active = true;
                 server = false;
+                detachedLocalSim = false;
             }else{
                 throw new IOException("alreadyconnected");
             }
@@ -191,6 +196,7 @@ public class Net{
         provider.hostServer(port);
         active = true;
         server = true;
+        detachedLocalSim = false;
 
         Time.runTask(60f, platform::updateRPC);
     }
@@ -206,6 +212,7 @@ public class Net{
         provider.closeServer();
         server = false;
         active = false;
+        detachedLocalSim = false;
     }
 
     public void reset(){
@@ -220,6 +227,7 @@ public class Net{
         provider.disconnectClient();
         server = false;
         active = false;
+        detachedLocalSim = false;
         for(var stream : streams){
             stream.value.close();
         }
@@ -399,16 +407,37 @@ public class Net{
     }
 
     /**
-     * Whether this is a client or not.
+     * Whether this is a client actively synced to the server's current sector.
+     * Returns false when running V2 detached local simulation in another sector so simulation ticks locally.
      */
     public boolean client(){
+        return !server && active && !detachedLocalSim;
+    }
+
+    /**
+     * Whether this instance is physically connected as a client to a multiplayer host
+     * (true for both co-located guests and V2 detached-sector guests).
+     */
+    public boolean isConnectedClient(){
         return !server && active;
+    }
+
+    /**
+     * Whether this client is currently simulating a different campaign sector locally while connected to the host.
+     */
+    public boolean isDetachedClient(){
+        return !server && active && detachedLocalSim;
+    }
+
+    public void setDetachedLocalSim(boolean detached){
+        this.detachedLocalSim = detached && !server && active;
     }
 
     public void dispose(){
         provider.dispose();
         server = false;
         active = false;
+        detachedLocalSim = false;
     }
 
     /** Networking implementation. */

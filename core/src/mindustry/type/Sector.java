@@ -12,6 +12,7 @@ import mindustry.*;
 import mindustry.content.*;
 import mindustry.game.Saves.*;
 import mindustry.game.*;
+import mindustry.game.coop.*;
 import mindustry.gen.*;
 import mindustry.graphics.g3d.PlanetGrid.*;
 import mindustry.ui.*;
@@ -128,11 +129,17 @@ public class Sector{
 
     public boolean isAttacked(){
         if(isBeingPlayed()) return state.rules.waves || state.rules.attackMode;
+        if(net != null && net.isConnectedClient() && state.isCampaign()){
+            return MultiSectorCoordinator.get().isSyncedAttacked(this);
+        }
         return save != null && (info.waves || info.attack) && info.hasCore;
     }
 
     /** @return whether the player has a base (active save with a core) here. */
     public boolean hasBase(){
+        if(net != null && net.isConnectedClient() && state.isCampaign()){
+            return MultiSectorCoordinator.get().hasSyncedBase(this);
+        }
         return save != null && info.hasCore && !(Vars.state.isGame() && Vars.state.rules.sector == this && state.gameOver);
     }
 
@@ -180,6 +187,9 @@ public class Sector{
 
     public boolean isCaptured(){
         if(isBeingPlayed()) return !state.rules.waves && !state.rules.attackMode;
+        if(net != null && net.isConnectedClient() && state.isCampaign()){
+            return MultiSectorCoordinator.get().isSyncedCaptured(this);
+        }
         return save != null && !info.waves && !info.attack;
     }
 

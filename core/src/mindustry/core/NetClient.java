@@ -20,6 +20,7 @@ import mindustry.entities.units.*;
 import mindustry.game.EventType.*;
 import mindustry.game.*;
 import mindustry.game.Teams.*;
+import mindustry.game.coop.*;
 import mindustry.gen.*;
 import mindustry.io.*;
 import mindustry.io.TypeIO.*;
@@ -123,6 +124,7 @@ public class NetClient implements ApplicationListener{
         });
 
         net.handleClient(Disconnect.class, packet -> {
+            MultiSectorCoordinator.get().reset();
             if(quietReset) return;
 
             connecting = false;
@@ -213,6 +215,8 @@ public class NetClient implements ApplicationListener{
                 });
             }
         });
+
+        MultiSectorCoordinator.get().init();
     }
 
     public void addPacketHandler(String type, Cons<String> handler){
@@ -377,7 +381,9 @@ public class NetClient implements ApplicationListener{
 
             //invoke event for all clients but also locally
             //this is required so other clients get the correct name even if they don't know who's sending it yet
-            Call.sendMessage(netServer.chatFormatter.format(player, message), message, player);
+            String formatted = netServer.chatFormatter.format(player, message);
+            Call.sendMessage(formatted, message, player);
+            MultiSectorCoordinator.get().broadcastChatToDetached(formatted);
         }else{
 
             //a command was sent, now get the output
@@ -482,6 +488,7 @@ public class NetClient implements ApplicationListener{
 
     @Remote(variants = Variant.both)
     public static void worldDataBegin(){
+        net.setDetachedLocalSim(false);
         Groups.clear();
         netClient.removed.clear();
         logic.reset();
@@ -558,6 +565,7 @@ public class NetClient implements ApplicationListener{
 
     @Remote(variants = Variant.both, priority = PacketPriority.low, unreliable = true)
     public static void entitySnapshot(short amount, byte[] data){
+        if(net.isDetachedClient()) return;
         try{
             netClient.lastSnapshotTimestamp = Time.millis();
             netClient.byteStream.setBytes(data);
@@ -575,6 +583,7 @@ public class NetClient implements ApplicationListener{
 
     @Remote(variants = Variant.one, priority = PacketPriority.low, unreliable = true)
     public static void hiddenSnapshot(IntSeq ids){
+        if(net.isDetachedClient()) return;
         for(int i = 0; i < ids.size; i++){
             int id = ids.items[i];
             var entity = Groups.sync.getByID(id);
@@ -586,6 +595,7 @@ public class NetClient implements ApplicationListener{
 
     @Remote(variants = Variant.both, priority = PacketPriority.low, unreliable = true)
     public static void blockSnapshot(short amount, byte[] data){
+        if(net.isDetachedClient()) return;
         try{
             netClient.byteStream.setBytes(data);
             DataInputStream input = netClient.dataStream;
@@ -610,8 +620,9 @@ public class NetClient implements ApplicationListener{
         }
     }
 
-    @Remote(priority = PacketPriority.low, unreliable = true)
+    @Remote(variants = Variant.both, priority = PacketPriority.low, unreliable = true)
     public static void stateSnapshot(float waveTime, int wave, int enemies, boolean paused, boolean gameOver, int timeData, byte tps, long rand0, long rand1, byte[] coreData){
+        if(net.isDetachedClient()) return;
         try{
             if(wave > state.wave){
                 state.wave = wave;
@@ -623,7 +634,7 @@ public class NetClient implements ApplicationListener{
             state.wave = wave;
             state.enemies = enemies;
             if(!state.isMenu()){
-                state.set(paused ? State.paused : State.playing);
+                state.set((paused && !state.isPauseLocked()) ? State.paused : State.playing);
             }
             state.serverTps = tps & 0xff;
 
@@ -656,7 +667,18 @@ public class NetClient implements ApplicationListener{
 
     @Override
     public void update(){
-        if(!net.client()) return;
+        if(!net.isConnectedClient()) return;
+
+        if(net.isDetachedClient()){
+            if(state.isGame()){
+                if(pingTime.poll()){
+                    Call.ping(Time.millis());
+                }
+            }else if(!connecting){
+                net.disconnect();
+            }
+            return;
+        }
 
         if(state.isGame()){
             if(!connecting){
@@ -730,15 +752,19 @@ public class NetClient implements ApplicationListener{
 
     /** Disconnects, resetting state to the menu. */
     public void disconnectQuietly(){
+        MultiSectorCoordinator.get().flushBeforeClientDisconnect();
         quiet = true;
         connecting = false;
         net.disconnect();
+        MultiSectorCoordinator.get().reset();
     }
 
     /** Disconnects, causing no further changes or reset.*/
     public void disconnectNoReset(){
+        MultiSectorCoordinator.get().flushBeforeClientDisconnect();
         quiet = quietReset = true;
         net.disconnect();
+        MultiSectorCoordinator.get().reset();
     }
 
     /** When set, any disconnects will be ignored and no dialogs will be shown. */

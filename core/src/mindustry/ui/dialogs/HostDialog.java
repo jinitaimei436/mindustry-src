@@ -4,6 +4,7 @@ import arc.*;
 import arc.scene.ui.*;
 import arc.util.*;
 import mindustry.game.EventType.*;
+import mindustry.game.coop.*;
 import mindustry.gen.*;
 import mindustry.net.*;
 import mindustry.ui.*;
@@ -61,6 +62,30 @@ public class HostDialog extends BaseDialog{
 
         cont.row();
 
+        cont.table(p -> {
+            p.left().defaults().left().pad(3f);
+            var perms = MultiSectorCoordinator.get().permissions;
+            p.add("[accent]战役联机房客权限 (V2)").row();
+            p.check("允许房客切换已有区块", perms.allowGuestSectorSwitch, val -> {
+                perms.allowGuestSectorSwitch = val;
+                MultiSectorCoordinator.get().broadcastPermissions();
+            }).row();
+            p.check("允许房客发射核心到新区块", perms.allowGuestCoreLaunch, val -> {
+                perms.allowGuestCoreLaunch = val;
+                MultiSectorCoordinator.get().broadcastPermissions();
+            }).row();
+            p.check("允许房客研究共享科技树", perms.allowGuestResearch, val -> {
+                perms.allowGuestResearch = val;
+                MultiSectorCoordinator.get().broadcastPermissions();
+            }).row();
+            p.check("允许房客放弃区块", perms.allowGuestAbandon, val -> {
+                perms.allowGuestAbandon = val;
+                MultiSectorCoordinator.get().broadcastPermissions();
+            }).row();
+        }).width(w + 60f).pad(6f).colspan(3);
+
+        cont.row();
+
         cont.add().width(65f);
 
         cont.button("@host", () -> {
@@ -96,6 +121,7 @@ public class HostDialog extends BaseDialog{
                 net.host(Core.settings.getInt("port", port));
                 player.admin = true;
                 Events.fire(new HostEvent());
+                MultiSectorCoordinator.get().onHostStarted();
             }catch(Exception e){
                 ui.showException(e.getMessage() != null && e.getMessage().toLowerCase(Locale.ROOT).contains("address already in use") ? "@server.error.addressinuse" : "@server.error", e);
             }

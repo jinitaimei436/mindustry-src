@@ -406,15 +406,17 @@ public class HudFragment{
                     select.button(Icon.pause, style, () -> {
                         if(net.active()){
                             ui.listfrag.toggle();
-                        }else if(!state.rules.pauseDisabled){
+                        }else if(!state.isPauseLocked()){
                             state.set(state.isPaused() ? State.playing : State.paused);
+                        }else{
+                            showPauseDisabled();
                         }
                     }).name("pause").update(i -> {
                         if(net.active()){
                             i.setDisabled(false);
                             i.getStyle().imageUp = Icon.players;
                         }else{
-                            i.setDisabled(state.rules.pauseDisabled || (state.isCampaign() && state.afterGameOver));
+                            i.setDisabled(state.isPauseLocked() || (state.isCampaign() && state.afterGameOver));
                             i.getStyle().imageUp = state.isPaused() ? Icon.play : Icon.pause;
                         }
                     });

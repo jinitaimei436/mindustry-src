@@ -8,6 +8,7 @@ import mindustry.content.*;
 import mindustry.game.EventType.*;
 import mindustry.game.Schematic.*;
 import mindustry.game.SectorInfo.*;
+import mindustry.game.coop.*;
 import mindustry.game.strategy.*;
 import mindustry.gen.*;
 import mindustry.type.*;
@@ -32,7 +33,7 @@ public class Universe{
 
         //update base coverage on capture
         Events.on(SectorCaptureEvent.class, e -> {
-            if(!net.client() && state.isCampaign()){
+            if(!net.isConnectedClient() && state.isCampaign()){
                 state.getSector().planet.updateBaseCoverage();
             }
         });
@@ -64,8 +65,12 @@ public class Universe{
     /** Update planet rotations, global time and relevant state. */
     public void update(){
 
-        //only update time when not in multiplayer
-        if(!net.client()){
+        if(net.active()){
+            MultiSectorCoordinator.get().update(Time.delta / 60f);
+        }
+
+        //only update authoritative global campaign time/logistics on singleplayer or host (never on detached guests)
+        if(!net.isConnectedClient()){
             secondCounter += Time.delta / 60f;
             turnCounter += Time.delta;
 
@@ -291,7 +296,7 @@ public class Universe{
 
     public int seconds(){
         //use networked seconds when playing as client
-        return net.client() ? netSeconds : seconds;
+        return net.isConnectedClient() ? netSeconds : seconds;
     }
 
     public void setSeconds(float seconds){
@@ -306,6 +311,7 @@ public class Universe{
     }
 
     private void save(){
+        if(net.isConnectedClient()) return;
         Core.settings.put("utimei", seconds);
         Core.settings.put("turn", turn);
     }

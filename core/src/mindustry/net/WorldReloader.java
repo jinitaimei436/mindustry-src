@@ -23,6 +23,7 @@ public class WorldReloader{
 
             for(Player p : Groups.player){
                 if(p.isLocal()) continue;
+                if(p.con == null || !p.con.isCoLocated()) continue;
 
                 players.add(p);
                 p.clearUnit();
@@ -30,7 +31,11 @@ public class WorldReloader{
 
             logic.reset();
 
-            Call.worldDataBegin();
+            for(Player p : players){
+                if(p.con != null){
+                    Call.worldDataBegin(p.con);
+                }
+            }
         }else{
             if(net.client()){
                 net.reset();

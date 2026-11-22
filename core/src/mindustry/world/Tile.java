@@ -921,8 +921,9 @@ public class Tile implements Position, QuadTreeObject, Displayable{
         build.killed();
     }
 
-    @Remote
+    @Remote(variants = Variant.both)
     public static void buildHealthUpdate(IntSeq buildings){
+        if(net.isDetachedClient()) return;
         for(int i = 0; i < buildings.size; i += 2){
             int pos = buildings.items[i];
             float health = Float.intBitsToFloat(buildings.items[i + 1]);

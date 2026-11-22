@@ -6,6 +6,7 @@ import arc.scene.ui.*;
 import arc.scene.ui.layout.*;
 import mindustry.*;
 import mindustry.game.*;
+import mindustry.game.coop.*;
 import mindustry.gen.*;
 import mindustry.type.*;
 import mindustry.ui.*;
@@ -20,12 +21,15 @@ public class CampaignRulesDialog extends BaseDialog{
         addCloseButton();
 
         hidden(() -> {
-            if(planet != null){
+            if(planet != null && !Vars.net.isConnectedClient()){
                 planet.saveRules();
 
                 if(Vars.state.isGame() && Vars.state.isCampaign() && Vars.state.getPlanet() == planet){
                     planet.campaignRules.apply(planet, Vars.state.rules);
                     Call.setRules(Vars.state.rules);
+                }
+                if(Vars.net.server()){
+                    MultiSectorCoordinator.get().broadcastPermissions();
                 }
             }
         });
@@ -77,6 +81,28 @@ public class CampaignRulesDialog extends BaseDialog{
 
             if(!planet.clearSectorOnLose){
                 check("@rules.clearsectoronloss", b -> rules.clearSectorOnLose = b, () -> rules.clearSectorOnLose);
+            }
+
+            if(!Vars.net.isConnectedClient()){
+                var perms = MultiSectorCoordinator.get().permissions;
+                current.image().color(mindustry.graphics.Pal.accent).growX().height(3f).padTop(8f).padBottom(4f).row();
+                current.add("[accent]战役联机房客权限 (V2)").left().row();
+                current.check("允许房客切换已有区块", perms.allowGuestSectorSwitch, b -> {
+                    perms.allowGuestSectorSwitch = b;
+                    MultiSectorCoordinator.get().broadcastPermissions();
+                }).left().row();
+                current.check("允许房客发射核心到新区块", perms.allowGuestCoreLaunch, b -> {
+                    perms.allowGuestCoreLaunch = b;
+                    MultiSectorCoordinator.get().broadcastPermissions();
+                }).left().row();
+                current.check("允许房客研究共享科技树", perms.allowGuestResearch, b -> {
+                    perms.allowGuestResearch = b;
+                    MultiSectorCoordinator.get().broadcastPermissions();
+                }).left().row();
+                current.check("允许房客放弃区块", perms.allowGuestAbandon, b -> {
+                    perms.allowGuestAbandon = b;
+                    MultiSectorCoordinator.get().broadcastPermissions();
+                }).left().row();
             }
         }).growY();
     }

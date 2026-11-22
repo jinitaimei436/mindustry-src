@@ -1,0 +1,63 @@
+name: Build Android APK
+on:
+  push:
+    branches: [ master, main ]
+  workflow_dispatch:
+env:
+  ANDROID_HOME: /usr/local/lib/android/sdk
+  ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read version
+        id: ver
+        run: |
+          if [ -f VERSION ]; then V=$(tr -d '[:space:]' < VERSION); else V=$(git rev-parse --short HEAD); fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: 17
+      - name: Clone Arc dependency
+        run: git clone --depth=1 --branch=master https://github.com/Anuken/Arc ../Arc
+      - name: Install Android SDK packages
+        run: |
+          set -e
+          SDKMANAGER=$(ls -d "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager | head -1)
+          yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
+          "$SDKMANAGER" "platform-tools" "platforms;android-36" "build-tools;36.0.0"
+      # AGP 8.2.2 has a bug: R8 cannot read merged_java_res/base.jar.
+      # Fixed in AGP 8.3+. Do NOT disable R8 as a workaround: it breaks
+      # default-interface-method desugaring and the app crashes on launch.
+      - name: Upgrade Android Gradle Plugin
+        run: sed -i "s#com.android.tools.build:gradle:8.2.2#com.android.tools.build:gradle:8.13.2#" android/build.gradle
+      - name: Provide java resource
+        run: |
+          mkdir -p android/src/main/resources/mindustry
+          echo "${{ steps.ver.outputs.version }}" > android/src/main/resources/mindustry/fork-version.txt
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Build Debug APK
+        run: |
+          chmod +x gradlew
+          ./gradlew android:assembleDebug --stacktrace --no-daemon
+      - name: Verify desugared companion classes
+        run: |
+          APK=$(ls android/build/outputs/apk/debug/*.apk | head -1)
+          unzip -p "$APK" 'classes*.dex' > /tmp/all.dex
+          if grep -a -q 'Application\$-CC' /tmp/all.dex; then
+            echo 'DESUGAR-OK: companion classes present'
+          else
+            echo 'FATAL: default interface methods were NOT desugared'; exit 1
+          fi
+      - name: Rename APK with version
+        run: |
+          mkdir -p out
+          for f in android/build/outputs/apk/debug/*.apk; do cp "$f" "out/mindustry-v${{ steps.ver.outputs.version }}-debug.apk"; done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mindustry-${{ steps.ver.outputs.version }}-debug-apk
+          path: out/*.apk
+          retention-days: 14

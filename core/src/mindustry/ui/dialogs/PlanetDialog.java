@@ -26,6 +26,7 @@ import mindustry.game.EventType.*;
 import mindustry.game.Objectives.*;
 import mindustry.game.SectorInfo.*;
 import mindustry.game.*;
+import mindustry.game.coop.*;
 import mindustry.gen.*;
 import mindustry.graphics.*;
 import mindustry.graphics.g3d.PlanetGrid.*;
@@ -180,7 +181,7 @@ public class PlanetDialog extends BaseDialog implements PlanetInterfaceRenderer{
 
         //show selection of Erekir/Serpulo campaign if the user has no bases, and hasn't selected yet (essentially a "have they played campaign before" check)
         shown(() -> {
-            if(!settings.getBool("campaignselect") && !content.planets().contains(p -> p.sectors.contains(Sector::hasBase))){
+            if(!net.isConnectedClient() && !settings.getBool("campaignselect") && !content.planets().contains(p -> p.sectors.contains(Sector::hasBase))){
                 var diag = new BaseDialog("@campaign.select");
 
                 Planet[] selected = {null};
@@ -236,7 +237,7 @@ public class PlanetDialog extends BaseDialog implements PlanetInterfaceRenderer{
     /** show with no limitations, just as a map. */
     @Override
     public Dialog show(){
-        if(net.client()){
+        if(net.isConnectedClient() && !Vars.state.isCampaign()){
             ui.showInfo("@map.multiplayer");
             return this;
         }
@@ -267,12 +268,14 @@ public class PlanetDialog extends BaseDialog implements PlanetInterfaceRenderer{
 
         newPresets.clear();
 
-        //announce new presets
-        for(SectorPreset preset : content.sectors()){
-            if(preset.unlocked() && preset.sector.preset == preset && !preset.alwaysUnlocked && !preset.sector.info.shown && preset.requireUnlock && !preset.sector.hasBase() && preset.planet == state.planet){
-                newPresets.add(preset.sector);
-                preset.sector.info.shown = true;
-                preset.sector.saveInfo();
+        //announce new presets (skip mutating local singleplayer flags when connected as guest)
+        if(!net.isConnectedClient()){
+            for(SectorPreset preset : content.sectors()){
+                if(preset.unlocked() && preset.sector.preset == preset && !preset.alwaysUnlocked && !preset.sector.info.shown && preset.requireUnlock && !preset.sector.hasBase() && preset.planet == state.planet){
+                    newPresets.add(preset.sector);
+                    preset.sector.info.shown = true;
+                    preset.sector.saveInfo();
+                }
             }
         }
 
@@ -496,6 +499,15 @@ public class PlanetDialog extends BaseDialog implements PlanetInterfaceRenderer{
             planets.drawBorders(selected, borderColor, state.uiAlpha);
         }
 
+        //V2: Unified bright yellow outline for every sector currently occupied by at least one player
+        if(state.uiAlpha > 0.01f && net.active()){
+            for(Sector sec : planet.sectors){
+                if(MultiSectorCoordinator.get().isSectorOccupied(sec)){
+                    planets.drawSelection(sec, Tmp.c1.set(Pal.accent).a(state.uiAlpha), 0.042f, 0.002f);
+                }
+            }
+        }
+
         planets.batch.flush(Gl.triangles);
     }
 
@@ -578,6 +590,20 @@ public class PlanetDialog extends BaseDialog implements PlanetInterfaceRenderer{
                     Fonts.outline.setColor(Color.white);
                     Fonts.outline.getData().setScale(1f);
                 });
+            }
+
+            //V2: Floating centered player count badge for every occupied sector
+            if(net.active() && state.uiAlpha > 0.01f){
+                int playerCount = MultiSectorCoordinator.get().getSectorPlayerCount(sec);
+                if(playerCount > 0){
+                    planets.drawPlane(sec, () -> {
+                        Fonts.outline.getData().setScale(0.75f);
+                        Fonts.outline.setColor(Tmp.c1.set(Pal.accent).a(state.uiAlpha));
+                        Fonts.outline.draw(String.valueOf(playerCount), 0f, Fonts.outline.getCapHeight() / 2f, Align.center);
+                        Fonts.outline.setColor(Color.white);
+                        Fonts.outline.getData().setScale(1f);
+                    });
+                }
             }
         }
 
@@ -736,7 +762,7 @@ public class PlanetDialog extends BaseDialog implements PlanetInterfaceRenderer{
             t.add(pane).colspan(2).row();
             t.button("@campaign.difficulty", Icon.bookSmall, () -> {
                 Vars.ui.campaignRules.show(state.planet);
-            }).margin(12f).size(208f, 40f).padTop(12f).visible(() -> state.planet.allowCampaignRules && mode != planetLaunch).row();
+            }).margin(12f).size(208f, 40f).padTop(12f).visible(() -> state.planet.allowCampaignRules && mode != planetLaunch && !net.isConnectedClient()).row();
             t.add().height(64f); //padding for close button
             Table starsTable = new Table(Styles.black);
             pane.setWidget(starsTable);
@@ -1062,7 +1088,9 @@ public class PlanetDialog extends BaseDialog implements PlanetInterfaceRenderer{
                 c.add(sector.preset.displayDescription()).width(420f).wrap().left().row();
             }
 
-            c.add(Core.bundle.get("sectors.time") + " [accent]" + sector.save.getPlayTime()).left().row();
+            if(sector.save != null){
+                c.add(Core.bundle.get("sectors.time") + " [accent]" + sector.save.getPlayTime()).left().row();
+            }
 
             if(sector.info.attempts > 0){
                 c.add(Core.bundle.get("sectors.attempts") + " [accent]" + sector.info.attempts).left().row();
@@ -1139,7 +1167,7 @@ public class PlanetDialog extends BaseDialog implements PlanetInterfaceRenderer{
 
         dialog.addCloseButton();
 
-        if(sector.hasBase()){
+        if(sector.hasBase() && (!net.isConnectedClient() || MultiSectorCoordinator.get().canLocalGuestAbandon())){
             dialog.buttons.button("@sector.abandon", Icon.cancel, () -> abandonSectorConfirm(sector, dialog::hide));
         }
 
@@ -1149,6 +1177,13 @@ public class PlanetDialog extends BaseDialog implements PlanetInterfaceRenderer{
     public void abandonSectorConfirm(Sector sector, Runnable listener){
         ui.showConfirm("@sector.abandon.confirm", () -> {
             if(listener != null) listener.run();
+
+            if(net.isConnectedClient()){
+                MultiSectorCoordinator.get().requestGuestAbandonSector(sector);
+                updateSelected();
+                rebuildList();
+                return;
+            }
 
             if(sector.isBeingPlayed()){
                 hide();
@@ -1198,7 +1233,7 @@ public class PlanetDialog extends BaseDialog implements PlanetInterfaceRenderer{
 
         stable.table(title -> {
             title.add("[accent]" + sector.name() + (debugSelect && (sector.info.name != null || sector.preset != null) ? " [lightgray](" + sector.id + ")" : "")).padLeft(3);
-            if(sector.preset == null || (!sector.preset.requireUnlock)){
+            if(!net.isConnectedClient() && (sector.preset == null || (!sector.preset.requireUnlock))){
                 title.add().growX();
 
                 title.button(Icon.pencilSmall, Styles.clearNonei, () -> {
@@ -1321,6 +1356,13 @@ public class PlanetDialog extends BaseDialog implements PlanetInterfaceRenderer{
 
         stable.row();
 
+        if(net.active()){
+            int occCount = MultiSectorCoordinator.get().getSectorPlayerCount(sector);
+            if(occCount > 0){
+                stable.add("[accent]当前区块玩家数: " + occCount).row();
+            }
+        }
+
         if(sector.hasBase()){
             stable.button("@stats", Icon.info, Styles.cleart, () -> showStats(sector)).height(40f).fillX().row();
         }
@@ -1336,15 +1378,21 @@ public class PlanetDialog extends BaseDialog implements PlanetInterfaceRenderer{
             }
 
             boolean noCandidate = hasNoCandidate(sector);
+            boolean guestNoPerm = net.isConnectedClient() && mode == look && !sector.isBeingPlayed() && (
+                sector.hasBase()
+                    ? !MultiSectorCoordinator.get().canLocalGuestSwitchSector()
+                    : !MultiSectorCoordinator.get().canLocalGuestLaunchCore()
+            );
 
             stable.button(
                 mode == select ? "@sectors.select" :
                 sector.isBeingPlayed() ? "@sectors.resume" :
+                guestNoPerm ? "房主未开放权限" :
                 sector.hasBase() ? "@sectors.go" :
                 locked ? "@locked" :
                 noCandidate ? "@sectors.nolaunchcandidate" :
                 "@sectors.launch",
-                locked ? Icon.lock : Icon.play, this::playSelected).growX().height(54f).minWidth(170f).padTop(4).disabled(locked || noCandidate);
+                (locked || guestNoPerm) ? Icon.lock : Icon.play, this::playSelected).growX().height(54f).minWidth(170f).padTop(4).disabled(locked || noCandidate || guestNoPerm);
         }
 
         stable.pack();
@@ -1362,6 +1410,12 @@ public class PlanetDialog extends BaseDialog implements PlanetInterfaceRenderer{
     }
 
     boolean canPlaySector(Sector sector){
+        if(net.isConnectedClient() && mode == look && !sector.isBeingPlayed()){
+            boolean permOk = sector.hasBase()
+                ? MultiSectorCoordinator.get().canLocalGuestSwitchSector()
+                : MultiSectorCoordinator.get().canLocalGuestLaunchCore();
+            if(!permOk) return false;
+        }
         return !isLocked(sector) && !hasNoCandidate(sector);
     }
 
@@ -1380,10 +1434,21 @@ public class PlanetDialog extends BaseDialog implements PlanetInterfaceRenderer{
             return;
         }
 
+        //V2: Multiplayer guest routes sector switch & core launch through Host authority
+        if(net.isConnectedClient() && mode == look){
+            if(sector.hasBase()){
+                MultiSectorCoordinator.get().requestGuestSwitchSector(sector);
+            }else{
+                MultiSectorCoordinator.get().requestGuestLaunchSector(findLauncher(sector), sector);
+            }
+            hide();
+            return;
+        }
+
         boolean shouldHide = true;
 
         //save before launch.
-        if(control.saves.getCurrent() != null && Vars.state.isGame() && mode != select){
+        if(control.saves.getCurrent() != null && Vars.state.isGame() && mode != select && !net.isConnectedClient()){
             try{
                 control.saves.getCurrent().save();
             }catch(Throwable e){

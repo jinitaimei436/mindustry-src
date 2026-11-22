@@ -7,6 +7,7 @@ import arc.util.*;
 import mindustry.*;
 import mindustry.editor.*;
 import mindustry.game.*;
+import mindustry.game.coop.*;
 import mindustry.gen.*;
 
 import static mindustry.Vars.*;
@@ -81,7 +82,7 @@ public class PausedDialog extends BaseDialog{
 
             cont.button("@abandon", Icon.cancel, () -> ui.planet.abandonSectorConfirm(state.rules.sector, this::hide)).padTop(tpad)
             .colspan(showObjective ? 1 : 2).width(showObjective ? dw : dw * 2 + 10f)
-            .disabled(b -> net.client() || state.gameOver).visible(() -> state.rules.sector != null).row();
+            .disabled(b -> (net.isConnectedClient() && !MultiSectorCoordinator.get().canLocalGuestAbandon()) || state.gameOver).visible(() -> state.rules.sector != null).row();
 
             cont.button("@back", Icon.left, this::hide).name("back");
             cont.button("@settings", Icon.settings, ui.settings::show).name("settings");
@@ -187,8 +188,8 @@ public class PausedDialog extends BaseDialog{
     }
 
     public void runExitSave(boolean save){
-        boolean wasClient = net.client();
-        if(net.client()) netClient.disconnectQuietly();
+        boolean wasClient = net.isConnectedClient();
+        if(net.isConnectedClient()) netClient.disconnectQuietly();
 
         if(state.isEditor() && !wasClient){
             ui.editor.resumeEditing();

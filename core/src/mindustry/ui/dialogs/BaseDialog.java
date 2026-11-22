@@ -25,14 +25,14 @@ public class BaseDialog extends Dialog{
         titleImage = titleTable.image(Tex.whiteui, Pal.accent).growX().height(3f).pad(4f).get();
 
         hidden(() -> {
-            if(shouldPause && state.isGame() && !net.active() && !wasPaused){
+            if(shouldPause && state.isGame() && !net.active() && !state.isPauseLocked() && !wasPaused){
                 state.set(State.playing);
             }
             Sounds.uiBack.play();
         });
 
         shown(() -> {
-            if(shouldPause && state.isGame() && !net.active()){
+            if(shouldPause && state.isGame() && !net.active() && !state.isPauseLocked()){
                 wasPaused = state.is(State.paused);
                 state.set(State.paused);
             }

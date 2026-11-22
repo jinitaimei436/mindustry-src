@@ -20,6 +20,7 @@ import mindustry.content.TechTree.*;
 import mindustry.core.*;
 import mindustry.game.EventType.*;
 import mindustry.game.Objectives.*;
+import mindustry.game.coop.*;
 import mindustry.gen.*;
 import mindustry.graphics.*;
 import mindustry.input.*;
@@ -58,7 +59,7 @@ public class ResearchDialog extends BaseDialog{
         });
 
         Events.on(UnlockEvent.class, e -> {
-            if(net.client() && !needsRebuild){
+            if(net.isConnectedClient() && !needsRebuild){
                 needsRebuild = true;
                 Core.app.post(() -> {
                     needsRebuild = false;
@@ -109,7 +110,7 @@ public class ResearchDialog extends BaseDialog{
 
         margin(0f).marginBottom(8);
         cont.stack(titleTable, view = new View(), itemDisplay = new ItemsDisplay()).grow();
-        itemDisplay.visible(() -> !net.client());
+        itemDisplay.visible(() -> !net.isConnectedClient());
 
         titleTable.toFront();
 
@@ -459,33 +460,32 @@ public class ResearchDialog extends BaseDialog{
                 button.resizeImage(32f);
                 button.getImage().setScaling(Scaling.fit);
                 button.visible(() -> node.visible);
-                if(!net.client()){
-                    button.clicked(() -> {
-                        if(moved) return;
+                button.clicked(() -> {
+                    if(moved) return;
+                    if(net.isConnectedClient() && !MultiSectorCoordinator.get().canLocalGuestResearch()) return;
 
-                        if(mobile){
-                            hoverNode = button;
-                            rebuild();
-                            float right = infoTable.getRight();
-                            if(right > Core.graphics.getWidth()){
-                                float moveBy = right - Core.graphics.getWidth();
-                                addAction(new RelativeTemporalAction(){
-                                    {
-                                        setDuration(0.1f);
-                                        setInterpolation(Interp.fade);
-                                    }
+                    if(mobile){
+                        hoverNode = button;
+                        rebuild();
+                        float right = infoTable.getRight();
+                        if(right > Core.graphics.getWidth()){
+                            float moveBy = right - Core.graphics.getWidth();
+                            addAction(new RelativeTemporalAction(){
+                                {
+                                    setDuration(0.1f);
+                                    setInterpolation(Interp.fade);
+                                }
 
-                                    @Override
-                                    protected void updateRelative(float percentDelta){
-                                        panX -= moveBy * percentDelta;
-                                    }
-                                });
-                            }
-                        }else if(canSpend(node.node) && locked(node.node)){
-                            spend(node.node);
+                                @Override
+                                protected void updateRelative(float percentDelta){
+                                    panX -= moveBy * percentDelta;
+                                }
+                            });
                         }
-                    });
-                }
+                    }else if(canSpend(node.node) && locked(node.node)){
+                        spend(node.node);
+                    }
+                });
 
                 button.hovered(() -> {
                     if(!mobile && hoverNode != button && node.visible){
@@ -503,10 +503,12 @@ public class ResearchDialog extends BaseDialog{
                 button.userObject = node.node;
                 button.setSize(nodeSize);
                 button.update(() -> {
-                    button.setDisabled(net.client() && !mobile);
+                    boolean guestCanResearch = net.isConnectedClient() && MultiSectorCoordinator.get().canLocalGuestResearch();
+                    boolean guestBlocked = net.isConnectedClient() && !guestCanResearch;
+                    button.setDisabled(guestBlocked && !mobile);
                     float offset = (Core.graphics.getHeight() % 2) / 2f;
                     button.setPosition(node.x + panX + width / 2f, node.y + panY + height / 2f + offset, Align.center);
-                    button.getStyle().up = !locked(node.node) ? Tex.buttonOver : !selectable(node.node) || (!canSpend(node.node) && !net.client()) ? Tex.buttonRed : Tex.button;
+                    button.getStyle().up = !locked(node.node) ? Tex.buttonOver : !selectable(node.node) || (!canSpend(node.node) && !guestBlocked) ? Tex.buttonRed : Tex.button;
 
                     ((TextureRegionDrawable)button.getStyle().imageUp).setRegion(node.selectable ? node.node.content.uiIcon : Icon.lock.getRegion());
                     button.getImage().setColor(!locked(node.node) ? Color.white : node.selectable ? Color.gray : Pal.gray);
@@ -549,7 +551,10 @@ public class ResearchDialog extends BaseDialog{
         }
 
         boolean canSpend(TechNode node){
-            if(!selectable(node) || net.client()) return false;
+            if(!selectable(node)) return false;
+            if(net.isConnectedClient()){
+                return MultiSectorCoordinator.get().canLocalGuestResearch() && node.content.locked();
+            }
 
             if(node.requirements.length == 0) return true;
 
@@ -565,7 +570,10 @@ public class ResearchDialog extends BaseDialog{
         }
 
         void spend(TechNode node){
-            if(net.client()) return;
+            if(net.isConnectedClient()){
+                MultiSectorCoordinator.get().requestGuestResearch(node.content);
+                return;
+            }
 
             boolean complete = true;
 
@@ -622,6 +630,9 @@ public class ResearchDialog extends BaseDialog{
             Core.scene.act();
             Sounds.uiUnlock.play();
             Events.fire(new ResearchEvent(node.content));
+            if(net.server()){
+                MultiSectorCoordinator.get().broadcastTechUnlock(node.content);
+            }
         }
 
         void rebuild(){
@@ -672,10 +683,14 @@ public class ResearchDialog extends BaseDialog{
                     desc.left().defaults().left();
                     desc.add(selectable ? node.content.localizedName : "[accent]???");
                     desc.row();
-                    if(locked(node) || (debugShowRequirements && !net.client())){
+                    if(locked(node) || (debugShowRequirements && !net.isConnectedClient())){
 
-                        if(net.client()){
-                            desc.add("@locked").color(Pal.remove);
+                        if(net.isConnectedClient()){
+                            if(MultiSectorCoordinator.get().canLocalGuestResearch() && selectable){
+                                desc.add("[accent]点击申请解锁 (使用共享物资)");
+                            }else{
+                                desc.add("@locked").color(Pal.remove);
+                            }
                         }else{
                             desc.table(t -> {
                                 t.left();
@@ -755,7 +770,7 @@ public class ResearchDialog extends BaseDialog{
                     }
                 }).pad(9).left().growX();
 
-                if(mobile && locked(node) && !net.client()){
+                if(mobile && locked(node) && (!net.isConnectedClient() || MultiSectorCoordinator.get().canLocalGuestResearch())){
                     b.row();
                     b.button("@research", Icon.ok, new TextButtonStyle(){{
                         disabled = Tex.button;

@@ -4,6 +4,7 @@ import arc.*;
 import arc.util.*;
 import mindustry.game.EventType.*;
 import mindustry.game.*;
+import mindustry.game.coop.*;
 import mindustry.gen.*;
 import mindustry.maps.*;
 import mindustry.mod.*;
@@ -57,7 +58,25 @@ public class GameState{
         return teams.bosses.firstOpt();
     }
 
+    /**
+     * V2: Whenever more than one player is present in the game (co-located or across sectors),
+     * pausing is strictly disabled for everyone (host and guests). Singleplayer keeps pause enabled.
+     */
+    public boolean isPauseLocked(){
+        if(rules != null && rules.pauseDisabled) return true;
+        if(net != null && net.active()){
+            if(net.isConnectedClient()) return true;
+            if(MultiSectorCoordinator.get().getTotalOnlinePlayers() > 1) return true;
+            if(Groups.player != null && Groups.player.size() > 1) return true;
+        }
+        return false;
+    }
+
     public void set(State astate){
+        if(astate == State.paused && isPauseLocked()){
+            astate = State.playing;
+        }
+
         //nothing to change.
         if(state == astate) return;
 
