@@ -321,8 +321,9 @@ public class Universe{
         if(net.isConnectedClient()) return;
         Core.settings.put("utimei", seconds);
         Core.settings.put("turn", turn);
-        SectorPowerGridManager.get().save();
-        SectorConveyorManager.get().save();
+        SectorPowerGridManager.get().save(false);
+        SectorConveyorManager.get().save(false);
+        Core.settings.manualSave();
     }
 
     private void load(){

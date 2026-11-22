@@ -5,11 +5,13 @@ import arc.struct.*;
 import arc.util.*;
 import arc.util.serialization.*;
 import mindustry.content.*;
+import mindustry.game.*;
 import mindustry.game.EventType.*;
 import mindustry.game.coop.*;
 import mindustry.game.logistics.SectorConveyorMath.*;
 import mindustry.gen.*;
 import mindustry.type.*;
+import mindustry.world.*;
 import mindustry.world.blocks.distribution.*;
 import mindustry.world.blocks.distribution.SectorConveyorPort.*;
 
@@ -51,6 +53,18 @@ public class SectorConveyorManager{
         Events.on(WorldLoadEvent.class, e -> {
             if(state != null && state.isCampaign() && state.hasSector()){
                 syncCurrentSectorPorts();
+            }
+        });
+
+        Events.on(SaveLoadEvent.class, e -> {
+            if(!e.isMap && state != null && state.isCampaign() && state.hasSector()){
+                syncCurrentSectorPorts();
+            }
+        });
+
+        Events.on(SaveWriteEvent.class, e -> {
+            if(state != null && state.isCampaign()){
+                saveIfAuthoritative(true);
             }
         });
 
@@ -103,7 +117,7 @@ public class SectorConveyorManager{
         SectorPortRecord rec = topo.registerPort(sector.id, portNumber, isSender, tier);
         if(rec != null && !existed){
             markChanged();
-            saveIfAuthoritative();
+            saveIfAuthoritative(true);
             notifyNetworkChange();
         }
         return rec;
@@ -114,7 +128,7 @@ public class SectorConveyorManager{
         PlanetConveyorTopology topo = getTopology(sector.planet);
         if(topo.unregisterPort(sector.id, portNumber, isSender)){
             markChanged();
-            saveIfAuthoritative();
+            saveIfAuthoritative(true);
             notifyNetworkChange();
         }
     }
@@ -124,7 +138,7 @@ public class SectorConveyorManager{
         PlanetConveyorTopology topo = getTopology(sector.planet);
         if(topo.clearSector(sector.id)){
             markChanged();
-            saveIfAuthoritative();
+            saveIfAuthoritative(true);
             notifyNetworkChange();
         }
     }
@@ -143,9 +157,12 @@ public class SectorConveyorManager{
     /**
      * Scans the active sector for all default-team cross-sector conveyor ports, ensures each
      * has a valid unique port number, reconciles topology, and syncs live receiver buffers.
+     * Scans {@code world.tiles} directly so it remains accurate even during {@link WorldLoadEvent}
+     * before {@link mindustry.ai.BlockIndexer} populates team building indices.
      */
     public void syncCurrentSectorPorts(){
         if(state == null || !state.isCampaign() || !state.hasSector()) return;
+        if(world == null || world.tiles == null || world.isGenerating()) return;
         Sector sec = state.getSector();
         if(!sec.hasBase()){
             onSectorLost(sec);
@@ -155,35 +172,26 @@ public class SectorConveyorManager{
         PlanetConveyorTopology topo = getTopology(sec.planet);
         Set<Long> liveKeys = new HashSet<>();
         boolean changed = false;
+        Team defaultTeam = state.rules.defaultTeam;
 
-        SectorConveyorPort[] blocks = new SectorConveyorPort[]{
-            Blocks.basicSectorConveyorSender instanceof SectorConveyorPort b ? b : null,
-            Blocks.advancedSectorConveyorSender instanceof SectorConveyorPort b ? b : null,
-            Blocks.basicSectorConveyorReceiver instanceof SectorConveyorPort b ? b : null,
-            Blocks.advancedSectorConveyorReceiver instanceof SectorConveyorPort b ? b : null
-        };
-
-        for(SectorConveyorPort blk : blocks){
-            if(blk == null) continue;
-            Seq<Building> list = state.rules.defaultTeam.data().getBuildings(blk);
-            if(list == null) continue;
-            for(int i = 0; i < list.size; i++){
-                if(list.get(i) instanceof SectorConveyorPortBuild build && build.isValid()){
-                    if(build.portNumber <= 0){
-                        int assigned = topo.allocatePortNumber(sec.id, blk.isSender);
-                        if(assigned > 0){
-                            build.portNumber = assigned;
-                            changed = true;
-                        }
+        for(Tile tile : world.tiles){
+            if(tile != null && tile.build instanceof SectorConveyorPortBuild build
+                && build.tile == tile && build.team == defaultTeam && build.isValid()
+                && build.block instanceof SectorConveyorPort blk){
+                if(build.portNumber <= 0){
+                    int assigned = topo.allocatePortNumber(sec.id, blk.isSender);
+                    if(assigned > 0){
+                        build.portNumber = assigned;
+                        changed = true;
                     }
-                    if(build.portNumber > 0){
-                        boolean existed = topo.getPort(sec.id, blk.isSender, build.portNumber) != null;
-                        SectorPortRecord rec = topo.registerPort(sec.id, build.portNumber, blk.isSender, blk.portTier);
-                        if(rec != null){
-                            liveKeys.add(SectorConveyorMath.packPortKey(sec.id, blk.isSender, build.portNumber));
-                            build.syncItemModuleFromRecord(rec);
-                            if(!existed) changed = true;
-                        }
+                }
+                if(build.portNumber > 0){
+                    boolean existed = topo.getPort(sec.id, blk.isSender, build.portNumber) != null;
+                    SectorPortRecord rec = topo.registerPort(sec.id, build.portNumber, blk.isSender, blk.portTier);
+                    if(rec != null){
+                        liveKeys.add(SectorConveyorMath.packPortKey(sec.id, blk.isSender, build.portNumber));
+                        build.syncItemModuleFromRecord(rec);
+                        if(!existed) changed = true;
                     }
                 }
             }
@@ -195,7 +203,7 @@ public class SectorConveyorManager{
 
         if(changed){
             markChanged();
-            saveIfAuthoritative();
+            saveIfAuthoritative(true);
             notifyNetworkChange();
         }
     }
@@ -250,7 +258,7 @@ public class SectorConveyorManager{
 
         if(topo.bind(senderSectorId, senderPortNumber, receiverSectorId, receiverPortNumber, true)){
             markChanged();
-            saveIfAuthoritative();
+            saveIfAuthoritative(true);
             notifyNetworkChange();
             return 1;
         }
@@ -279,7 +287,7 @@ public class SectorConveyorManager{
 
         if(topo.unbindSender(link.senderSectorId, link.senderPortNumber)){
             markChanged();
-            saveIfAuthoritative();
+            saveIfAuthoritative(true);
             notifyNetworkChange();
             return -1;
         }
@@ -300,14 +308,14 @@ public class SectorConveyorManager{
             if(!sSec.hasBase() || !rSec.hasBase() || !sSec.near().contains(rSec)) return 0;
             if(topo.bind(sSecId, sPort, rSecId, rPort, true)){
                 markChanged();
-                saveIfAuthoritative();
+                saveIfAuthoritative(true);
                 return 1;
             }
             return 0;
         }else{
             if(topo.unbindSender(sSecId, sPort)){
                 markChanged();
-                saveIfAuthoritative();
+                saveIfAuthoritative(true);
                 return -1;
             }
             return 0;
@@ -366,24 +374,31 @@ public class SectorConveyorManager{
             notifyNetworkChange();
         }
         if(dirty){
-            saveIfAuthoritative();
+            saveIfAuthoritative(false);
         }
     }
 
     // ==================== PERSISTENCE & V2 MULTIPLAYER SYNC ====================
 
-    private void saveIfAuthoritative(){
+    private void saveIfAuthoritative(boolean flushDisk){
         if(net != null && net.isConnectedClient()) return;
-        save();
+        save(flushDisk);
     }
 
     public void save(){
+        save(false);
+    }
+
+    public void save(boolean flushDisk){
         if(Core.settings == null) return;
         if(net != null && net.isConnectedClient()) return;
         try{
             byte[] bytes = serializeAllTopologies();
             Core.settings.put(SETTINGS_KEY, new String(Base64Coder.encode(bytes)));
             dirty = false;
+            if(flushDisk){
+                Core.settings.manualSave();
+            }
         }catch(Throwable t){
             Log.err("Failed to save V2.8 cross-sector conveyor grid", t);
         }

@@ -382,6 +382,15 @@ public class SurgeSectorPowerHub extends PowerNode{
         @Override
         public void updateTile(){
             super.updateTile();
+            if(power != null && power.graph != null){
+                power.graph.ensureSectorHub(this);
+            }
+            if(state != null && state.isCampaign() && state.hasSector() && team == state.rules.defaultTeam){
+                Sector sec = state.getSector();
+                if(sec.hasBase() && !SectorPowerGridManager.get().hasHub(sec)){
+                    SectorPowerGridManager.get().onHubActive(sec, this);
+                }
+            }
             HubAnimState previous = anim.state;
             // Use delta() rather than edelta() so shutdown animations always finish smoothly even when disabled
             if(anim.step(shouldHubOperate(), delta(), startupDuration, runCycleDuration, shutdownDuration)){

@@ -5,11 +5,13 @@ import arc.struct.*;
 import arc.util.*;
 import arc.util.serialization.*;
 import mindustry.content.*;
+import mindustry.game.*;
 import mindustry.game.EventType.*;
 import mindustry.game.coop.*;
 import mindustry.game.power.SectorPowerGridMath.*;
 import mindustry.gen.*;
 import mindustry.type.*;
+import mindustry.world.*;
 import mindustry.world.blocks.power.*;
 import mindustry.world.blocks.power.SurgeSectorPowerHub.*;
 
@@ -54,6 +56,18 @@ public class SectorPowerGridManager{
             }
         });
 
+        Events.on(SaveLoadEvent.class, e -> {
+            if(!e.isMap && state != null && state.isCampaign() && state.hasSector()){
+                syncCurrentSectorHubStatus();
+            }
+        });
+
+        Events.on(SaveWriteEvent.class, e -> {
+            if(state != null && state.isCampaign()){
+                saveIfAuthoritative(true);
+            }
+        });
+
         Events.on(SectorLoseEvent.class, e -> {
             if(e.sector != null){
                 onSectorLost(e.sector);
@@ -94,21 +108,36 @@ public class SectorPowerGridManager{
     public void onHubActive(@Nullable Sector sector, @Nullable SurgeSectorPowerHubBuild hub){
         if(sector == null) return;
         PlanetPowerTopology topo = getTopology(sector.planet);
+        boolean existed = topo.hasHub(sector.id);
         boolean changed = topo.setHubActive(sector.id, true);
         if(hub != null && hub.power != null && hub.power.graph != null){
             PowerGraph g = hub.power.graph;
+            g.ensureSectorHub(hub);
+            float liveIn = Math.max(0f, g.getLastScaledPowerIn());
+            float liveOut = Math.max(0f, g.getLastScaledPowerOut());
+            float stored = g.getBatteryStored();
+            float cap = g.getTotalBatteryCapacity();
+            SectorPowerNode existing = topo.getNode(sector.id);
+            // Preserve persisted production/consumption telemetry on tick 0 right after loading a save
+            // before PowerGraph.update() has run its first tick.
+            float prodToStore = (liveIn <= 0.0001f && liveOut <= 0.0001f && existed && existing != null)
+                ? existing.produced
+                : liveIn;
+            float needToStore = (liveIn <= 0.0001f && liveOut <= 0.0001f && existed && existing != null)
+                ? existing.needed
+                : liveOut;
             topo.updateSectorTelemetry(
                 sector.id,
-                Math.max(0f, g.getLastScaledPowerIn()),
-                Math.max(0f, g.getLastScaledPowerOut()),
-                g.getBatteryStored(),
-                g.getTotalBatteryCapacity(),
+                prodToStore,
+                needToStore,
+                stored,
+                cap,
                 Time.millis()
             );
         }
         if(changed){
             markChanged();
-            saveIfAuthoritative();
+            saveIfAuthoritative(true);
             notifyNetworkChange();
         }
     }
@@ -119,7 +148,7 @@ public class SectorPowerGridManager{
         boolean changed = topo.setHubActive(sector.id, false);
         if(changed){
             markChanged();
-            saveIfAuthoritative();
+            saveIfAuthoritative(true);
             notifyNetworkChange();
         }
     }
@@ -130,18 +159,48 @@ public class SectorPowerGridManager{
     }
 
     /**
+     * Locates a valid SurgeSectorPowerHubBuild belonging to the default team in the currently loaded world.
+     * Falls back to scanning {@code world.tiles} directly because {@link WorldLoadEvent} listeners
+     * registered by Universe execute before {@link mindustry.ai.BlockIndexer} populates team building indices.
+     */
+    private @Nullable SurgeSectorPowerHubBuild findLiveHubInWorld(){
+        if(state == null || state.rules == null || state.rules.defaultTeam == null || Blocks.surgeSectorPowerHub == null){
+            return null;
+        }
+        Team defaultTeam = state.rules.defaultTeam;
+        Seq<Building> hubs = defaultTeam.data().getBuildings(Blocks.surgeSectorPowerHub);
+        if(hubs != null && hubs.size > 0){
+            for(int i = 0; i < hubs.size; i++){
+                if(hubs.get(i) instanceof SurgeSectorPowerHubBuild build && build.isValid()){
+                    return build;
+                }
+            }
+        }
+        if(world != null && world.tiles != null){
+            for(Tile tile : world.tiles){
+                if(tile != null && tile.build instanceof SurgeSectorPowerHubBuild build
+                    && build.tile == tile && build.team == defaultTeam && build.isValid()){
+                    return build;
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
      * Scans the active sector for the default team's Surge Sector Power Hub so pre-existing
      * or freshly loaded saves immediately synchronize hub presence & auto-clean broken links.
      */
     public void syncCurrentSectorHubStatus(){
         if(state == null || !state.isCampaign() || !state.hasSector() || Blocks.surgeSectorPowerHub == null) return;
+        if(world == null || world.tiles == null || world.isGenerating()) return;
         Sector sec = state.getSector();
         if(!sec.hasBase()){
             onHubRemoved(sec);
             return;
         }
-        Seq<Building> hubs = state.rules.defaultTeam.data().getBuildings(Blocks.surgeSectorPowerHub);
-        if(hubs != null && hubs.size > 0 && hubs.first() instanceof SurgeSectorPowerHubBuild build){
+        SurgeSectorPowerHubBuild build = findLiveHubInWorld();
+        if(build != null){
             onHubActive(sec, build);
         }else{
             onHubRemoved(sec);
@@ -194,7 +253,7 @@ public class SectorPowerGridManager{
         int res = topo.toggleLink(a.id, b.id, true);
         if(res != 0){
             markChanged();
-            saveIfAuthoritative();
+            saveIfAuthoritative(true);
             notifyNetworkChange();
         }
         return res;
@@ -215,7 +274,7 @@ public class SectorPowerGridManager{
         int res = topo.toggleLink(a.id, b.id, true);
         if(res != 0){
             markChanged();
-            saveIfAuthoritative();
+            saveIfAuthoritative(true);
         }
         return res;
     }
@@ -312,24 +371,31 @@ public class SectorPowerGridManager{
             notifyNetworkChange();
         }
         if(dirty){
-            saveIfAuthoritative();
+            saveIfAuthoritative(false);
         }
     }
 
     // ==================== PERSISTENCE & V2 MULTIPLAYER SYNC ====================
 
-    private void saveIfAuthoritative(){
+    private void saveIfAuthoritative(boolean flushDisk){
         if(net != null && net.isConnectedClient()) return;
-        save();
+        save(flushDisk);
     }
 
     public void save(){
+        save(false);
+    }
+
+    public void save(boolean flushDisk){
         if(Core.settings == null) return;
         if(net != null && net.isConnectedClient()) return;
         try{
             byte[] bytes = serializeAllTopologies();
             Core.settings.put(SETTINGS_KEY, new String(Base64Coder.encode(bytes)));
             dirty = false;
+            if(flushDisk){
+                Core.settings.manualSave();
+            }
         }catch(Throwable t){
             Log.err("Failed to save V2.5 cross-sector power grid", t);
         }

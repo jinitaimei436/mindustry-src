@@ -19,7 +19,7 @@ public class SectorPowerGridTests{
 
     @Test
     void versionForkTagIsCurrent(){
-        assertEquals("v2.8.1", Version.forkVersion);
+        assertEquals("v3.0", Version.forkVersion);
     }
 
     @Test

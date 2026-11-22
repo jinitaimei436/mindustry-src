@@ -320,9 +320,11 @@ public class PlanetDialog extends BaseDialog implements PlanetInterfaceRenderer{
             addBack();
             addTech();
         }else{
+            float uiWidth = Core.graphics.getWidth() / Scl.scl(1f);
+            float maxCenter = Math.max(180f, Math.min(340f, uiWidth - 420f));
             addBack();
             buttons.add().growX();
-            buttons.add(sectorTop).minWidth(230f);
+            buttons.add(sectorTop).minWidth(Math.min(230f, maxCenter)).maxWidth(maxCenter);
             buttons.add().growX();
             addTech();
         }
@@ -791,7 +793,7 @@ public class PlanetDialog extends BaseDialog implements PlanetInterfaceRenderer{
                     public void tap(InputEvent event, float x, float y, int count, KeyCode button){
                         if(showing() || button != KeyCode.mouseLeft) return;
 
-                        //V2.5: Power View click-to-link / click-to-unlink interaction on yellow hub dots
+                        //V3.0: Power View direct two-node click to connect / disconnect & click-to-inspect
                         if(powerViewMode && mode == look){
                             SectorPowerGridManager pm = SectorPowerGridManager.get();
                             if(hovered != null && pm.hasHub(hovered)){
@@ -807,12 +809,8 @@ public class PlanetDialog extends BaseDialog implements PlanetInterfaceRenderer{
                                     return;
                                 }else if(powerLinkSource.planet == hovered.planet && powerLinkSource.near().contains(hovered)){
                                     int res = pm.requestToggleLink(state.planet, powerLinkSource, hovered);
-                                    if(res == 1){
-                                        ui.showInfoFade("已连接跨区块电网: " + powerLinkSource.name() + " ↔ " + hovered.name());
-                                    }else if(res == -1){
-                                        ui.showInfoFade("已断开跨区块电网连接: " + powerLinkSource.name() + " × " + hovered.name());
-                                    }else if(res == 2){
-                                        ui.showInfoFade("已向房主请求变更跨区块电网连线");
+                                    if(res == 2){
+                                        ui.showInfoFade("已向房主请求变更电网连线");
                                     }
                                     selected = hovered;
                                     powerLinkSource = null;
@@ -827,14 +825,17 @@ public class PlanetDialog extends BaseDialog implements PlanetInterfaceRenderer{
                                 }
                             }else{
                                 powerLinkSource = null;
-                                if(hovered != null && (canSelect(hovered) || debugSelect)){
-                                    selected = hovered;
-                                }
-                                if(selected != null){
-                                    updateSelected();
-                                }
+                                selected = (hovered != null && (canSelect(hovered) || debugSelect)) ? hovered : null;
+                                updateSelected();
                                 return;
                             }
+                        }
+
+                        //V3.0: Resource View click-to-inspect (clicking empty space hides panel)
+                        if(resourceViewMode && mode == look && hovered == null){
+                            selected = null;
+                            updateSelected();
+                            return;
                         }
 
                         if(hovered != null && selected == hovered && count == 2 && canPlaySector(hovered)){
@@ -947,15 +948,7 @@ public class PlanetDialog extends BaseDialog implements PlanetInterfaceRenderer{
         new Table(t -> {
             t.touchable = Touchable.disabled;
             t.top();
-            t.label(() ->
-                mode == select ? "@sectors.select" :
-                mode == planetLaunch ? "@sectors.launchselect" :
-                powerViewMode ? (powerLinkSource != null
-                    ? "电力视野 · 已选起点 [" + powerLinkSource.name() + "] — 点击相邻黄色光点建立/断开连接"
-                    : "电力视野 · 点击区块中心黄色光点，再点击相邻区块光点连接电网") :
-                resourceViewMode ? "资源视野 · 点击区块查看区块间传送带明细并配对相邻端口（与电力视野互斥）" :
-                ""
-            ).style(Styles.outlineLabel).color(Pal.accent);
+            t.label(() -> mode == select ? "@sectors.select" : mode == planetLaunch ? "@sectors.launchselect" : "").style(Styles.outlineLabel).color(Pal.accent);
         }),
         buttons,
 
@@ -969,33 +962,31 @@ public class PlanetDialog extends BaseDialog implements PlanetInterfaceRenderer{
             }).margin(12f).size(208f, 40f).padTop(12f).visible(() -> state.planet.allowCampaignRules && mode != planetLaunch && !net.isConnectedClient()).row();
             t.button("电力视野", Icon.powerSmall, Styles.flatTogglet, () -> {
                 if(!powerViewMode && !isPowerViewUnlocked()){
-                    ui.showInfoFade("需先在科技树解锁「巨浪区块电力枢纽」以开启电力视野");
+                    ui.showInfoFade("需先解锁「巨浪区块电力枢纽」");
                     return;
                 }
                 powerViewMode = !powerViewMode;
                 powerLinkSource = null;
+                selected = null;
                 if(powerViewMode){
-                    // Mutual exclusion: Power View and Resource View cannot be open simultaneously
                     resourceViewMode = false;
                     SectorPowerGridManager.get().syncCurrentSectorHubStatus();
                     lastPowerGridRevision = SectorPowerGridManager.get().getUiRevision();
-                    ui.showInfoFade("已开启电力视野：点击相邻黄色光点连接区块间电网");
                 }
                 updateSelected();
             }).margin(12f).size(208f, 40f).padTop(6f).checked(b -> powerViewMode).visible(() -> mode == look).row();
             t.button("资源视野", Icon.boxSmall, Styles.flatTogglet, () -> {
                 if(!resourceViewMode && !isResourceViewUnlocked()){
-                    ui.showInfoFade("需先解锁任意「区块间传送带」端点建筑以开启资源视野");
+                    ui.showInfoFade("需先解锁「区块间传送带」");
                     return;
                 }
                 resourceViewMode = !resourceViewMode;
+                selected = null;
                 if(resourceViewMode){
-                    // Mutual exclusion: Power View and Resource View cannot be open simultaneously
                     powerViewMode = false;
                     powerLinkSource = null;
                     SectorConveyorManager.get().syncCurrentSectorPorts();
                     lastConveyorRevision = SectorConveyorManager.get().getUiRevision();
-                    ui.showInfoFade("已开启资源视野：选中区块查看端口详情并进行相邻 1 对 1 配对");
                 }
                 updateSelected();
             }).margin(12f).size(208f, 40f).padTop(4f).checked(b -> resourceViewMode).visible(() -> mode == look).row();
@@ -1401,10 +1392,9 @@ public class PlanetDialog extends BaseDialog implements PlanetInterfaceRenderer{
                 }).left().row();
             }
 
-            //V2.8: Cross-sector conveyor port details inside sector stats dialog
-            if(sector.hasBase() && (resourceViewMode || SectorConveyorManager.get().hasAnyPort(sector))){
-                c.add("[#a9d8ff]区块间传送带端口明细").left().padTop(8f).row();
-                buildResourceConveyorSummary(c, sector, true, () -> {
+            //V3.0: Cross-sector conveyor 1-to-1 pairing table exclusively in sector detail dialog
+            if(sector.hasBase() && SectorConveyorManager.get().hasAnyPort(sector)){
+                buildResourceConveyorDetailSection(c, sector, () -> {
                     dialog.hide();
                     showStats(sector);
                     updateSelected();
@@ -1593,7 +1583,7 @@ public class PlanetDialog extends BaseDialog implements PlanetInterfaceRenderer{
             stable.row();
         }
 
-        if(sector.save != null && sector.info.resources.any()){
+        if(!powerViewMode && !resourceViewMode && sector.save != null && sector.info.resources.any()){
             stable.table(t -> {
                 t.add("@sectors.resources").padRight(4);
                 for(UnlockableContent c : sector.info.resources){
@@ -1612,17 +1602,17 @@ public class PlanetDialog extends BaseDialog implements PlanetInterfaceRenderer{
             }
         }
 
-        //V2.5: Cross-Sector Power Grid summary card in Power View (or whenever selected sector has a hub)
-        if(mode == look && (powerViewMode || (!resourceViewMode && SectorPowerGridManager.get().hasHub(sector)))){
+        //V3.0: Only show inter-sector power grid details when clicking a hub sector in Power View
+        if(mode == look && powerViewMode && SectorPowerGridManager.get().hasHub(sector)){
             buildPowerGridSummary(stable, sector);
         }
 
-        //V2.8: Global Resource View cross-sector conveyor summary & 1-to-1 port pairing card
-        if(mode == look && (resourceViewMode || (!powerViewMode && SectorConveyorManager.get().hasAnyPort(sector)))){
-            buildResourceConveyorSummary(stable, sector, resourceViewMode, this::updateSelected);
+        //V3.0: Only show compact resource input/output rates when clicking a sector in Resource View
+        if(mode == look && resourceViewMode && SectorConveyorManager.get().hasAnyPort(sector)){
+            buildResourceConveyorSummary(stable, sector);
         }
 
-        if(sector.hasBase()){
+        if(sector.hasBase() && !powerViewMode){
             stable.button("@stats", Icon.info, Styles.cleart, () -> showStats(sector)).height(40f).fillX().row();
         }
 
@@ -1784,62 +1774,32 @@ public class PlanetDialog extends BaseDialog implements PlanetInterfaceRenderer{
 
     private void buildPowerGridSummary(Table stable, Sector sector){
         SectorPowerGridManager pm = SectorPowerGridManager.get();
-        boolean hasHub = pm.hasHub(sector);
+        if(!pm.hasHub(sector)) return;
+
+        GridAggregate agg = pm.getGridAggregate(sector);
+        long prodSec = Math.round(agg.totalProduced * 60f);
+        long needSec = Math.round(agg.totalNeeded * 60f);
+        long netSec = prodSec - needSec;
+        String netColor = netSec >= 0 ? "[#84f491]+" : "[scarlet]";
+        int satPct = Math.round(agg.satisfaction * 100f);
 
         stable.table(Styles.black6, card -> {
             card.left().margin(6f);
-            if(!hasHub){
-                card.add("[lightgray]本区块尚未建造「巨浪区块电力枢纽」").left().row();
-                return;
-            }
-
-            GridAggregate agg = pm.getGridAggregate(sector);
-            long prodSec = Math.round(agg.totalProduced * 60f);
-            long needSec = Math.round(agg.totalNeeded * 60f);
-            long netSec = prodSec - needSec;
-            String netColor = netSec >= 0 ? "[#84f491]+" : "[scarlet]";
-            int satPct = Math.round(agg.satisfaction * 100f);
 
             card.table(hdr -> {
                 hdr.left();
-                hdr.image(Icon.powerSmall).color(agg.overloaded ? Pal.remove : Pal.powerLight).size(18f).padRight(4f);
-                hdr.add("[#ffd37f]区块间电网 [white](" + agg.sectorCount() + " 区块)" + (agg.overloaded ? " [scarlet][过载]" : "")).left();
+                hdr.image(Icon.powerSmall).color(agg.overloaded ? Pal.remove : Pal.powerLight).size(16f).padRight(4f);
+                hdr.add("[#ffd37f]区块间电网 [white](" + agg.sectorCount() + ")" + (agg.overloaded ? " [scarlet]过载" : "")).left();
             }).left().growX().padBottom(3f).row();
 
-            card.add("[lightgray]总产出: [white]+" + UI.formatAmount(prodSec) + "/秒  [lightgray]总消耗: [white]-" + UI.formatAmount(needSec) + "/秒").left().row();
-            card.add("[lightgray]净功率: " + netColor + UI.formatAmount(netSec) + "/秒  [lightgray]供电率: [white]" + satPct + "%").left().row();
-            card.add("[lightgray]总储存: [white]" + UI.formatAmount((long)agg.totalBatteryStored) + " / " + UI.formatAmount((long)agg.totalBatteryCapacity)).left().padBottom(4f).row();
+            card.add("[lightgray]产出 [white]+" + UI.formatAmount(prodSec) + "/s  [lightgray]消耗 [white]-" + UI.formatAmount(needSec) + "/s").left().row();
+            card.add("[lightgray]净值 " + netColor + UI.formatAmount(netSec) + "/s  [lightgray]供电 [white]" + satPct + "%").left().padBottom(4f).row();
 
             card.add(new Bar(
-                () -> "共享蓄电 " + (agg.totalBatteryCapacity > 0.01f ? Math.round(Mathf.clamp(agg.totalBatteryStored / agg.totalBatteryCapacity) * 100f) + "%" : "0%"),
+                () -> "蓄电 " + UI.formatAmount((long)agg.totalBatteryStored) + " / " + UI.formatAmount((long)agg.totalBatteryCapacity),
                 () -> agg.overloaded ? Pal.remove : Pal.powerBar,
                 () -> agg.totalBatteryCapacity > 0.01f ? Mathf.clamp(agg.totalBatteryStored / agg.totalBatteryCapacity) : 0f
-            )).growX().height(18f).padBottom(4f).row();
-
-            if(powerViewMode){
-                boolean isOrigin = powerLinkSource == sector;
-                card.button(isOrigin ? "取消连线起点" : "设为连线起点", Icon.link, Styles.cleart, () -> {
-                    powerLinkSource = isOrigin ? null : sector;
-                    updateSelected();
-                }).growX().height(34f).padBottom(2f).row();
-
-                var linkedIds = pm.getTopology(sector.planet).getLinkedNeighbors(sector.id);
-                if(!linkedIds.isEmpty()){
-                    card.add("[lightgray]已连相邻区块:").left().padTop(2f).row();
-                    for(int nid : linkedIds){
-                        if(nid < 0 || nid >= sector.planet.sectors.size) continue;
-                        Sector neighbor = sector.planet.sectors.get(nid);
-                        card.table(linkRow -> {
-                            linkRow.left();
-                            linkRow.add("[accent]• " + neighbor.name()).left().growX();
-                            linkRow.button("[scarlet]断开", Icon.cancelSmall, Styles.cleart, () -> {
-                                pm.requestToggleLink(sector.planet, sector, neighbor);
-                                updateSelected();
-                            }).height(30f).minWidth(72f);
-                        }).growX().row();
-                    }
-                }
-            }
+            )).growX().height(18f).row();
         }).growX().padTop(4f).padBottom(4f).row();
     }
 
@@ -1852,120 +1812,212 @@ public class PlanetDialog extends BaseDialog implements PlanetInterfaceRenderer{
         return !SectorConveyorManager.get().getTopology(state.planet).getPortSectorIds().isEmpty();
     }
 
-    private void buildResourceConveyorSummary(Table container, Sector sector, boolean allowPairing, Runnable refreshAction){
+    /**
+     * V3.0: Compact Resource View bottom card displaying ONLY cross-sector resource input/output rates.
+     * Kept intentionally narrow so sectorTop never overflows or shifts the left-side PlanetDialog UI.
+     */
+    private void buildResourceConveyorSummary(Table container, Sector sector){
         SectorConveyorManager cm = SectorConveyorManager.get();
         PlanetConveyorTopology topo = cm.getTopology(sector.planet);
         java.util.List<SectorPortRecord> ports = topo.getAllSectorPorts(sector.id);
+        if(ports.isEmpty()) return;
+
+        boolean hasReceiver = false;
+        boolean hasSender = false;
+        java.util.Map<Integer, Float> inRates = new java.util.LinkedHashMap<>();
+        java.util.Map<Integer, Float> outRates = new java.util.LinkedHashMap<>();
+
+        for(SectorPortRecord port : ports){
+            if(port.isSender){
+                hasSender = true;
+                for(java.util.Map.Entry<Integer, Float> e : port.itemRatesPerSec.entrySet()){
+                    if(e.getValue() > 0.001f){
+                        Float prev = outRates.get(e.getKey());
+                        outRates.put(e.getKey(), (prev == null ? 0f : prev) + e.getValue());
+                    }
+                }
+            }else{
+                hasReceiver = true;
+                for(java.util.Map.Entry<Integer, Float> e : port.itemRatesPerSec.entrySet()){
+                    if(e.getValue() > 0.001f){
+                        Float prev = inRates.get(e.getKey());
+                        inRates.put(e.getKey(), (prev == null ? 0f : prev) + e.getValue());
+                    }
+                }
+            }
+        }
+
+        final boolean showIn = hasReceiver;
+        final boolean showOut = hasSender;
 
         container.table(Styles.black6, card -> {
             card.left().margin(6f);
-
-            int senderCount = topo.countSendersInSector(sector.id);
-            int recvCount = topo.countReceiversInSector(sector.id);
-
-            card.table(hdr -> {
-                hdr.left();
-                hdr.image(Icon.boxSmall).color(Pal.lancerLaser).size(18f).padRight(4f);
-                hdr.add("[#a9d8ff]区块间传送带 [white](起始 " + senderCount + "/4 · 接收 " + recvCount + ")").left();
-            }).left().growX().padBottom(4f).row();
-
-            if(ports.isEmpty()){
-                card.add("[lightgray]本区块尚未建造区块间传送带起始端或接收端").left().row();
-                return;
+            if(showIn){
+                addCompactRateRow(card, "[#84f491]输入", "+", inRates);
             }
+            if(showOut){
+                addCompactRateRow(card, "[#ffd37f]输出", "-", outRates);
+            }
+        }).growX().padTop(4f).padBottom(4f).row();
+    }
+
+    private void addCompactRateRow(Table card, String label, String sign, java.util.Map<Integer, Float> rates){
+        card.table(row -> {
+            row.left();
+            row.add(label).left().padRight(8f);
+            if(rates.isEmpty() || content == null){
+                row.add("[lightgray]0/s").left();
+            }else{
+                row.table(items -> {
+                    items.left();
+                    int col = 0;
+                    for(java.util.Map.Entry<Integer, Float> e : rates.entrySet()){
+                        Item item = content.item(e.getKey());
+                        if(item == null) continue;
+                        items.image(item.uiIcon).size(16f).padRight(2f);
+                        items.add("[white]" + sign + Strings.autoFixed(e.getValue(), 1) + "/s").padRight(6f);
+                        if(++col % 2 == 0) items.row();
+                    }
+                    if(col == 0){
+                        items.add("[lightgray]0/s").left();
+                    }
+                }).left();
+            }
+        }).left().growX().padBottom(2f).row();
+    }
+
+    /**
+     * V3.0: Clean 3-column pairing table rendered exclusively inside the sector detail page (showStats):
+     *   起始端1        连接至        [点击选择 / 目标区块 · 接收端N]
+     *   接收端1        接收自        [点击选择 / 来源区块 · 起始端N]
+     */
+    private void buildResourceConveyorDetailSection(Table container, Sector sector, Runnable refreshAction){
+        SectorConveyorManager cm = SectorConveyorManager.get();
+        PlanetConveyorTopology topo = cm.getTopology(sector.planet);
+        java.util.List<SectorPortRecord> ports = topo.getAllSectorPorts(sector.id);
+        if(ports.isEmpty()) return;
+
+        container.add("[#a9d8ff]区块间传送带").left().padTop(8f).padBottom(4f).row();
+
+        container.table(Styles.black6, grid -> {
+            grid.left().margin(8f);
+            grid.defaults().padBottom(4f);
 
             for(SectorPortRecord port : ports){
-                String tierTag = port.tier == SectorConveyorMath.TIER_SENIOR ? "[#8ca9e8]高级" : "[accent]初级";
                 SectorConveyorLink link = port.isSender
                     ? topo.getLinkForSender(sector.id, port.portNumber)
                     : topo.getLinkForReceiver(sector.id, port.portNumber);
 
-                String detailText;
+                String portColor = port.tier == SectorConveyorMath.TIER_SENIOR ? "[#8ca9e8]" : "[accent]";
+                String portName = portColor + (port.isSender ? "起始端" : "接收端") + port.portNumber;
+                String relation = port.isSender ? "[lightgray]连接至" : "[lightgray]接收自";
+
+                String targetLabel;
                 if(link != null){
                     int peerSecId = port.isSender ? link.receiverSectorId : link.senderSectorId;
                     int peerPortNum = port.isSender ? link.receiverPortNumber : link.senderPortNumber;
                     String peerName = (peerSecId >= 0 && peerSecId < sector.planet.sectors.size)
                         ? sector.planet.sectors.get(peerSecId).name()
                         : ("区块" + peerSecId);
-                    String flow = SectorConveyorManager.formatItemFlowSummary(port);
-                    String pauseTag = (port.isSender && port.backpressurePaused) ? " [scarlet][满载暂停]" : "";
-                    if(port.isSender){
-                        detailText = tierTag + "[white] 本区块起始端" + port.portNumber
-                            + " 发送到 [" + peerName + "] 接收端" + peerPortNum
-                            + " 的 " + flow + pauseTag
-                            + " [lightgray](缓存 " + port.bufferedCount() + "/" + port.capacity + ")";
-                    }else{
-                        detailText = tierTag + "[white] 本区块接收端" + port.portNumber
-                            + " 接收到来自 [" + peerName + "] 起始端" + peerPortNum
-                            + " 的 " + flow
-                            + " [lightgray](缓存 " + port.bufferedCount() + "/" + port.capacity + ")";
-                    }
+                    targetLabel = "[white]" + peerName + " · " + (port.isSender ? "接收端" : "起始端") + peerPortNum;
                 }else{
-                    detailText = tierTag + "[white] 本区块" + (port.isSender ? "起始端" : "接收端") + port.portNumber
-                        + " [lightgray]· 未配对 (缓存 " + port.bufferedCount() + "/" + port.capacity + ")";
+                    targetLabel = "[lightgray]点击选择";
                 }
 
-                card.table(row -> {
-                    row.left();
-                    row.add(detailText).left().wrap().width(allowPairing ? 290f : 330f).padRight(6f);
-                    if(allowPairing){
-                        if(link != null){
-                            row.button("[scarlet]断开", Icon.cancelSmall, Styles.cleart, () -> {
-                                int res = cm.requestUnbind(sector.planet, sector.id, port.portNumber, port.isSender);
-                                if(res == -1) ui.showInfoFade("已断开跨区块传送带链接");
-                                else if(res == 2) ui.showInfoFade("已向房主请求断开跨区块传送带链接");
-                                if(refreshAction != null) refreshAction.run();
-                            }).height(30f).minWidth(68f);
-                        }else{
-                            row.button("[accent]配对", Icon.link, Styles.cleart, () -> {
-                                showPortPairingDialog(sector, port, refreshAction);
-                            }).height(30f).minWidth(68f);
-                        }
+                grid.add(portName).left().minWidth(72f).padRight(14f);
+                grid.add(relation).center().minWidth(52f).padRight(14f);
+                grid.button(targetLabel, Styles.cleart, () -> {
+                    showPortPairingDialog(sector, port, refreshAction);
+                }).left().minWidth(170f).height(36f).padRight(8f);
+
+                if(link != null){
+                    if(port.isSender && port.backpressurePaused){
+                        grid.add("[scarlet]满载").left();
+                    }else{
+                        grid.table(flow -> buildPortFlowIcons(flow, port)).left();
                     }
-                }).left().growX().padBottom(3f).row();
+                }else{
+                    grid.add();
+                }
+                grid.row();
             }
-        }).growX().padTop(4f).padBottom(4f).row();
+        }).left().growX().padBottom(6f).row();
+    }
+
+    private void buildPortFlowIcons(Table flow, SectorPortRecord port){
+        flow.left();
+        if(content == null || port.itemRatesPerSec.isEmpty()){
+            return;
+        }
+        int shown = 0;
+        for(java.util.Map.Entry<Integer, Float> e : port.itemRatesPerSec.entrySet()){
+            if(e.getValue() <= 0.001f) continue;
+            Item item = content.item(e.getKey());
+            if(item == null) continue;
+            flow.image(item.uiIcon).size(16f).padRight(2f);
+            flow.add("[lightgray]" + Strings.autoFixed(e.getValue(), 1) + "/s").padRight(6f);
+            if(++shown >= 2) break;
+        }
     }
 
     private void showPortPairingDialog(Sector sector, SectorPortRecord sourcePort, @Nullable Runnable onChanged){
         SectorConveyorManager cm = SectorConveyorManager.get();
+        PlanetConveyorTopology topo = cm.getTopology(sector.planet);
+        SectorConveyorLink existingLink = sourcePort.isSender
+            ? topo.getLinkForSender(sector.id, sourcePort.portNumber)
+            : topo.getLinkForReceiver(sector.id, sourcePort.portNumber);
         java.util.List<SectorPortRecord> candidates = cm.getAvailableAdjacentTargets(sector, sourcePort.isSender);
 
-        String roleTitle = sourcePort.isSender
-            ? "为本区块起始端" + sourcePort.portNumber + " 选择相邻接收端"
-            : "为本区块接收端" + sourcePort.portNumber + " 选择相邻起始端";
+        String roleTitle = (sourcePort.isSender ? "起始端" : "接收端") + sourcePort.portNumber
+            + (sourcePort.isSender ? " · 选择连接目标" : " · 选择来源");
 
         BaseDialog picker = new BaseDialog(roleTitle);
         picker.cont.pane(list -> {
             list.left().top().margin(6f);
-            if(candidates.isEmpty()){
-                list.add("[lightgray]当前所有相邻已占领区块中均无空闲的" + (sourcePort.isSender ? "接收端" : "起始端") + "可配对。").wrap().width(420f).pad(10f);
-                return;
-            }
-            for(SectorPortRecord target : candidates){
-                if(target.sectorId < 0 || target.sectorId >= sector.planet.sectors.size) continue;
-                Sector targetSec = sector.planet.sectors.get(target.sectorId);
-                String tierName = target.tier == SectorConveyorMath.TIER_SENIOR ? "高级" : "初级";
-                float effRate = Math.min(sourcePort.transferRate, target.transferRate);
-                String label = "[" + targetSec.name() + "] " + tierName + (target.isSender ? "起始端" : "接收端") + target.portNumber
-                    + "  [lightgray](限速 " + Strings.autoFixed(effRate, 0) + "个/秒 · 容量 " + target.capacity + ")";
 
-                list.button(label, Icon.link, Styles.cleart, () -> {
-                    int res = sourcePort.isSender
-                        ? cm.requestBind(sector.planet, sector.id, sourcePort.portNumber, target.sectorId, target.portNumber)
-                        : cm.requestBind(sector.planet, target.sectorId, target.portNumber, sector.id, sourcePort.portNumber);
-                    if(res == 1){
-                        ui.showInfoFade("已建立 1 对 1 跨区块传送带链接");
-                    }else if(res == 2){
-                        ui.showInfoFade("已向房主请求建立跨区块传送带链接");
-                    }else{
-                        ui.showInfoFade("无法配对：目标端口已被占用或区块不相邻");
+            if(existingLink != null){
+                list.button("[scarlet]断开当前连接", Icon.cancelSmall, Styles.cleart, () -> {
+                    int res = cm.requestUnbind(sector.planet, sector.id, sourcePort.portNumber, sourcePort.isSender);
+                    if(res == 2){
+                        ui.showInfoFade("已向房主请求断开连接");
                     }
                     picker.hide();
                     if(onChanged != null) onChanged.run();
-                }).left().growX().height(42f).padBottom(4f).row();
+                }).left().growX().height(40f).padBottom(6f).row();
             }
-        }).minWidth(460f).maxHeight(360f);
+
+            if(candidates.isEmpty()){
+                if(existingLink == null){
+                    list.add("[lightgray]相邻区块暂无空闲" + (sourcePort.isSender ? "接收端" : "起始端")).pad(10f);
+                }
+                return;
+            }
+
+            for(SectorPortRecord target : candidates){
+                if(target.sectorId < 0 || target.sectorId >= sector.planet.sectors.size) continue;
+                Sector targetSec = sector.planet.sectors.get(target.sectorId);
+                float effRate = Math.min(sourcePort.transferRate, target.transferRate);
+                String label = "[white]" + targetSec.name() + " · "
+                    + (target.isSender ? "起始端" : "接收端") + target.portNumber
+                    + "  [lightgray]" + Strings.autoFixed(effRate, 0) + "/s";
+
+                list.button(label, Icon.link, Styles.cleart, () -> {
+                    if(existingLink != null){
+                        cm.requestUnbind(sector.planet, sector.id, sourcePort.portNumber, sourcePort.isSender);
+                    }
+                    int res = sourcePort.isSender
+                        ? cm.requestBind(sector.planet, sector.id, sourcePort.portNumber, target.sectorId, target.portNumber)
+                        : cm.requestBind(sector.planet, target.sectorId, target.portNumber, sector.id, sourcePort.portNumber);
+                    if(res == 2){
+                        ui.showInfoFade("已向房主请求建立连接");
+                    }else if(res == 0){
+                        ui.showInfoFade("目标端口不可用");
+                    }
+                    picker.hide();
+                    if(onChanged != null) onChanged.run();
+                }).left().growX().height(40f).padBottom(4f).row();
+            }
+        }).minWidth(360f).maxHeight(360f);
         picker.addCloseButton();
         picker.show();
     }

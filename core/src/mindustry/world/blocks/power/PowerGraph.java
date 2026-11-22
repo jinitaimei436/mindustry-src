@@ -300,6 +300,14 @@ public class PowerGraph{
         return null;
     }
 
+    /** V3.0: Guarantees a live SurgeSectorPowerHubBuild stays bound to this graph and updater after save reload. */
+    public void ensureSectorHub(@Nullable SurgeSectorPowerHubBuild hub){
+        if(hub != null && hub.isValid() && hub.power != null && hub.power.graph == this){
+            sectorHub = hub;
+            checkAdd();
+        }
+    }
+
     public void addGraph(PowerGraph graph){
         if(graph == this) return;
 
