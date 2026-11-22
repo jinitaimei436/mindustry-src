@@ -12,6 +12,7 @@ import mindustry.game.power.*;
 import mindustry.game.power.SectorPowerGridMath.*;
 import mindustry.gen.*;
 import mindustry.graphics.*;
+import mindustry.type.*;
 import mindustry.ui.*;
 import mindustry.world.*;
 import mindustry.world.blocks.*;
