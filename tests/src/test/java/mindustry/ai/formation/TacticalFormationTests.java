@@ -17,7 +17,7 @@ public class TacticalFormationTests{
 
     @Test
     void versionForkTagIsV21(){
-        assertEquals("v3.0", Version.forkVersion);
+        assertEquals("v3.1", Version.forkVersion);
     }
 
     @Test

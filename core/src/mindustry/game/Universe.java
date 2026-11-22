@@ -7,7 +7,6 @@ import arc.util.*;
 import mindustry.content.*;
 import mindustry.game.EventType.*;
 import mindustry.game.Schematic.*;
-import mindustry.game.SectorInfo.*;
 import mindustry.game.coop.*;
 import mindustry.game.logistics.*;
 import mindustry.game.power.*;
@@ -89,17 +88,13 @@ public class Universe{
                 seconds += elapsedSec;
                 secondCounter %= 1f;
 
-                // Real-time 1-second step for global logistics & strategic layer + V2.5 cross-sector power
+                // Real-time 1-second settlement (coordinates GlobalStrategyManager, Cross-Sector Power, Conveyors & future extensions)
                 Planet curPlanet = state.getPlanet();
                 for(Planet planet : content.planets()){
                     if(curPlanet != null && curPlanet != planet && !curPlanet.updateGroup.contains(planet) && !planet.updateGroup.contains(curPlanet)){
                         continue;
                     }
-                    if(planet.campaignRules.globalLogistics){
-                        strategy.update(planet, elapsedSec);
-                    }
-                    SectorPowerGridManager.get().updateGlobalSecond(planet, elapsedSec);
-                    SectorConveyorManager.get().updateGlobalSecond(planet, elapsedSec);
+                    strategy.update(planet, elapsedSec);
                 }
 
                 //save every few seconds
@@ -172,11 +167,12 @@ public class Universe{
         return schem == null ? all.any() ? all.first() : null : schem;
     }
 
-    /** Runs possible events. Resets event counter. */
+    /** Runs periodic campaign world events (capture timers, invasions, TurnEvent).
+     *  Vanilla 2-minute multi-sector resource batch settlement has been removed in favor of
+     *  the unified 1-second real-time {@link GlobalStrategyManager} settlement engine. */
     public void runTurn(){
         turn++;
 
-        int newSecondsPassed = (int)(turnDuration / 60);
         Planet current = state.getPlanet();
 
         //update relevant sectors
@@ -187,34 +183,6 @@ public class Universe{
                 continue;
             }
 
-            if(planet.campaignRules.legacyLaunchPads && !planet.campaignRules.globalLogistics){
-                //first pass: clear import stats
-                for(Sector sector : planet.sectors){
-                    if(sector.hasBase() && !sector.isBeingPlayed()){
-                        sector.info.lastImported.clear();
-                    }
-                }
-
-                //second pass: update export & import statistics
-                for(Sector sector : planet.sectors){
-                    if(sector.hasBase() && !sector.isBeingPlayed() && !sector.isAttacked()){
-
-                        //export to another sector
-                        if(sector.info.destination != null){
-                            Sector to = sector.info.destination;
-                            if(to.hasBase() && to.planet == planet){
-                                ItemSeq items = new ItemSeq();
-                                //calculated exported items to this sector
-                                sector.info.export.each((item, stat) -> items.add(item, (int)(stat.mean * newSecondsPassed)));
-                                to.addItems(items);
-                                to.info.lastImported.add(items);
-                            }
-                        }
-                    }
-                }
-            }
-
-            //third pass: everything else
             for(Sector sector : planet.sectors){
                 if(sector.hasBase()){
                     if(sector.info.importRateCache != null){
@@ -230,28 +198,9 @@ public class Universe{
 
                     //attacked sectors are frozen in time; don't update those
                     if(!sector.isAttacked()){
-
-                        //increment seconds passed for this sector by the time that just passed with this turn
                         if(!sector.isBeingPlayed()){
-
-                            //add production only when globalLogistics is disabled (globalLogistics updates every second)
-                            if(!planet.campaignRules.globalLogistics){
-                                sector.info.production.each((item, stat) -> sector.info.items.add(item, Math.min((int)(stat.mean * newSecondsPassed), sector.info.storageCapacity - sector.info.items.get(item))));
-                            }
-
-                            if(planet.campaignRules.legacyLaunchPads && !planet.campaignRules.globalLogistics){
-                                sector.info.export.each((item, stat) -> {
-                                    if(sector.info.items.get(item) <= 0 && sector.info.production.get(item, ExportStat::new).mean < 0 && stat.mean > 0){
-                                        //cap export by import when production is negative.
-                                        //TODO remove
-                                        stat.mean = Math.min(sector.info.lastImported.get(item) / (float)newSecondsPassed, stat.mean);
-                                    }
-                                });
-                            }
-
-                            //prevent negative values with unloaders
+                            //prevent negative values with unloaders and ensure background info is saved
                             sector.info.items.checkNegative();
-
                             sector.saveInfo();
                         }
 
@@ -321,6 +270,7 @@ public class Universe{
         if(net.isConnectedClient()) return;
         Core.settings.put("utimei", seconds);
         Core.settings.put("turn", turn);
+        strategy.flushDirtySectors();
         SectorPowerGridManager.get().save(false);
         SectorConveyorManager.get().save(false);
         Core.settings.manualSave();

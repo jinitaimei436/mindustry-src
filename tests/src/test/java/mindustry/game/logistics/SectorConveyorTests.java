@@ -19,8 +19,8 @@ import static org.junit.jupiter.api.Assertions.*;
 public class SectorConveyorTests{
 
     @Test
-    void versionForkTagIsV30(){
-        assertEquals("v3.0", Version.forkVersion);
+    void versionForkTagIsV31(){
+        assertEquals("v3.1", Version.forkVersion);
     }
 
     @Test

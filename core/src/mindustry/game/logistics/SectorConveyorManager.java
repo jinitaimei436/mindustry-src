@@ -84,6 +84,10 @@ public class SectorConveyorManager{
         dirty = true;
     }
 
+    public void markDirty(){
+        dirty = true;
+    }
+
     public PlanetConveyorTopology getTopology(@Nullable Planet planet){
         if(planet == null) return new PlanetConveyorTopology();
         return getTopology(planet.name);
@@ -343,10 +347,23 @@ public class SectorConveyorManager{
     }
 
     /**
-     * Called once per second from {@link mindustry.game.Universe#update()} on SP/Host.
+     * Called once per second from {@link mindustry.game.Universe#update()} or
+     * {@link mindustry.game.strategy.CrossSectorConveyorExtension} on SP/Host.
      * Prunes ports on lost sectors and advances background-only sender links (with full backpressure).
      */
     public void updateGlobalSecond(@Nullable Planet planet, float dtSeconds){
+        updateGlobalSecond(planet, dtSeconds, null, null);
+    }
+
+    /**
+     * Power- and freeze-aware variant invoked by {@link mindustry.game.strategy.CrossSectorConveyorExtension}.
+     */
+    public void updateGlobalSecond(
+        @Nullable Planet planet,
+        float dtSeconds,
+        @Nullable java.util.Map<Integer, Float> sectorPowerEfficiency,
+        @Nullable Set<Integer> frozenSectorIds
+    ){
         if(planet == null || dtSeconds <= 0f) return;
         PlanetConveyorTopology topo = getTopology(planet);
 
@@ -366,7 +383,7 @@ public class SectorConveyorManager{
             localActiveIds.add(state.getSector().id);
         }
 
-        topo.stepBackgroundLinks(localActiveIds, dtSeconds);
+        topo.stepBackgroundLinks(localActiveIds, sectorPowerEfficiency, frozenSectorIds, dtSeconds);
         uiRevision++;
 
         if(pruned){
@@ -472,6 +489,10 @@ public class SectorConveyorManager{
                         out.writeInt(e.getKey());
                         out.writeFloat(e.getValue());
                     }
+                    out.writeInt(p.backgroundFeedPattern.size());
+                    for(int itemId : p.backgroundFeedPattern){
+                        out.writeInt(itemId);
+                    }
                 }
             }else{
                 out.writeInt(0);
@@ -512,6 +533,14 @@ public class SectorConveyorManager{
                     float rv = in.readFloat();
                     if(rv > 0.001f) rates.put(iid, rv);
                 }
+                List<Integer> feedPattern = null;
+                if(in.available() >= 4){
+                    int feedLen = Math.max(0, in.readInt());
+                    feedPattern = new ArrayList<>(feedLen);
+                    for(int j = 0; j < feedLen; j++){
+                        feedPattern.add(in.readInt());
+                    }
+                }
 
                 SectorPortRecord rec = topo.registerPort(sectorId, portNum, isSender, tier);
                 if(rec != null){
@@ -519,10 +548,13 @@ public class SectorConveyorManager{
                     rec.backpressurePaused = paused;
                     rec.lastItemId = lastItem;
                     rec.recentTotalRate = totalRate;
-                    // For senders, remote guest is authoritative over its input queue;
+                    // For senders, remote guest is authoritative over its input queue and feed mix;
                     // for receivers, only sync rates so Host-delivered cross-sector items aren't overwritten.
                     if(isSender){
                         rec.replaceFifo(fifoItems);
+                        if(feedPattern != null && !feedPattern.isEmpty()){
+                            rec.replaceFeedPattern(feedPattern);
+                        }
                     }
                     rec.itemRatesPerSec.clear();
                     rec.itemRatesPerSec.putAll(rates);

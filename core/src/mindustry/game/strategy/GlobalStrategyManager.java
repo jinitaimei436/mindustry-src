@@ -27,6 +27,10 @@ public class GlobalStrategyManager{
      * instead of overwriting them on the next 1-second tick.
      */
     private final HashMap<String, HashMap<Integer, HashMap<String, Integer>>> lastSyncedStorage = new HashMap<>();
+    /** Background sectors whose inventory changed since the last disk flush. */
+    private final HashSet<Sector> dirtySectors = new HashSet<>();
+    /** Ordered pluggable cross-sector subsystems (power grid, conveyors, future devices). */
+    private final ArrayList<CrossSectorExtension> extensions = new ArrayList<>();
     private final LogisticsPolicy policy;
     private StrategicAIController aiController;
 
@@ -36,6 +40,44 @@ public class GlobalStrategyManager{
 
     public GlobalStrategyManager(LogisticsPolicy policy){
         this.policy = policy;
+        registerExtension(new CrossSectorPowerExtension());
+        registerExtension(new CrossSectorConveyorExtension());
+    }
+
+    /** Registers a pluggable cross-sector extension (deduplicated by extensionId). */
+    public void registerExtension(CrossSectorExtension extension){
+        if(extension == null) return;
+        String id = extension.extensionId();
+        for(int i = 0; i < extensions.size(); i++){
+            if(extensions.get(i).extensionId().equals(id)){
+                extensions.set(i, extension);
+                return;
+            }
+        }
+        extensions.add(extension);
+    }
+
+    public List<CrossSectorExtension> getExtensions(){
+        return Collections.unmodifiableList(extensions);
+    }
+
+    /** Invoked by {@link SectorProfileCompiler} so extensions can contribute compiled nodes/metadata. */
+    public void notifyCompileSector(Sector sector, SectorInfo info, SectorStrategyProfile profile){
+        for(int i = 0; i < extensions.size(); i++){
+            extensions.get(i).onCompileSector(sector, info, profile);
+        }
+    }
+
+    /** Persists all background sectors modified by real-time settlement since the last flush. */
+    public void flushDirtySectors(){
+        if(dirtySectors.isEmpty()) return;
+        for(Sector sector : dirtySectors){
+            if(sector != null && sector.hasBase() && !sector.isBeingPlayed()){
+                sector.info.items.checkNegative();
+                sector.saveInfo();
+            }
+        }
+        dirtySectors.clear();
     }
 
     public void setAIController(StrategicAIController controller){
@@ -58,7 +100,7 @@ public class GlobalStrategyManager{
      * Typically called once per second from Universe.update().
      */
     public void update(Planet planet, float dtSeconds){
-        if(planet == null || !planet.campaignRules.globalLogistics) return;
+        if(planet == null || dtSeconds <= 0f) return;
 
         StrategySimulationEngine engine = getEngine(planet);
         HashMap<Integer, HashMap<String, Integer>> planetLastSynced =
@@ -91,6 +133,7 @@ public class GlobalStrategyManager{
             profile.defaultDestinationSectorId = sector.info.destination != null ? sector.info.destination.id : -1;
             profile.requireExplicitImportDemand = false;
             profile.foregroundExportRates.clear();
+            profile.clearExternalStepChannels();
 
             if(localForeground){
                 // Foreground sector runs natively; sync live storage from active core (including zeroes)
@@ -167,10 +210,20 @@ public class GlobalStrategyManager{
             }
         }
 
-        // 2. Step the pure-Java event-driven simulation engine
+        // 2. Pre-step cross-sector extensions (inter-sector power grid, background conveyor receiver drain, external demands)
+        for(int i = 0; i < extensions.size(); i++){
+            extensions.get(i).beforeStrategyStep(planet, engine, dtSeconds);
+        }
+
+        // 3. Step the pure-Java event-driven simulation engine
         engine.step(dtSeconds);
 
-        // 3. Push solved inventory & rates back into Mindustry SectorInfo (and foreground core / detached guests)
+        // 4. Post-step cross-sector extensions (background conveyor sender refill + power/freeze-aware transfer)
+        for(int i = 0; i < extensions.size(); i++){
+            extensions.get(i).afterStrategyStep(planet, engine, dtSeconds);
+        }
+
+        // 5. Push solved inventory & rates back into Mindustry SectorInfo (and foreground core / detached guests)
         Sector foregroundSector = null;
         for(Sector sector : planet.sectors){
             if(!sector.hasBase()) continue;
@@ -203,12 +256,20 @@ public class GlobalStrategyManager{
             // Update core items from float accumulator and snapshot pushed integers
             HashMap<String, Integer> syncedMap = planetLastSynced.computeIfAbsent(sector.id, k -> new HashMap<>());
             syncedMap.clear();
+            boolean inventoryChanged = false;
             for(Item item : content.items()){
+                int prevQty = sector.info.items.get(item);
                 int qty = Math.max(0, Math.min(sector.info.storageCapacity, Math.round(profile.getStored(item.name))));
-                sector.info.items.set(item, qty);
+                if(qty != prevQty){
+                    sector.info.items.set(item, qty);
+                    inventoryChanged = true;
+                }
                 if(qty > 0){
                     syncedMap.put(item.name, qty);
                 }
+            }
+            if(inventoryChanged){
+                dirtySectors.add(sector);
             }
 
             // Mirror solved rates into SectorInfo so PlanetDialog HUD and LandingPads show live numbers

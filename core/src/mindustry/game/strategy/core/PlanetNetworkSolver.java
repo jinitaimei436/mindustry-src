@@ -38,6 +38,8 @@ public class PlanetNetworkSolver{
             s.solvedImportRates.clear();
             s.bottleneckTag = "";
             s.solvedPowerSatisfaction = 1f;
+            s.solvedLocalPowerProd = 0f;
+            s.solvedLocalPowerCons = 0f;
             for(ProductionNode node : s.nodes){
                 node.solvedEfficiency = node.measuredEfficiency;
             }
@@ -326,6 +328,8 @@ public class PlanetNetworkSolver{
 
     private void clearInactiveSector(SectorStrategyProfile s){
         s.solvedPowerSatisfaction = 0f;
+        s.solvedLocalPowerProd = 0f;
+        s.solvedLocalPowerCons = 0f;
         s.solvedNetRates.clear();
         s.solvedGrossProduction.clear();
         s.solvedExportRates.clear();
@@ -397,10 +401,15 @@ public class PlanetNetworkSolver{
                 }
             }
 
-            float powerSat = policy.computePowerSatisfaction(powerProd, powerCons);
+            float localPowerSat = policy.computePowerSatisfaction(powerProd, powerCons);
+            float powerSat = sector.externalPowerSatisfaction >= 0f
+                ? Math.max(0f, Math.min(1f, sector.externalPowerSatisfaction))
+                : localPowerSat;
             sector.solvedPowerSatisfaction = powerSat;
+            sector.solvedLocalPowerProd = powerProd;
+            sector.solvedLocalPowerCons = powerCons;
 
-            // Compute item satisfaction ratios (supply includes local prod + imports + buffer)
+            // Compute item satisfaction ratios (supply includes local prod + route imports + external imports + buffer)
             itemSat.clear();
             String worstMissingItem = null;
             float worstSat = 1f;
@@ -414,6 +423,7 @@ public class PlanetNetworkSolver{
                 }
                 float supply = grossProd.getOrDefault(item, 0f)
                     + incomingImports.getOrDefault(item, 0f)
+                    + sector.externalImportRates.getOrDefault(item, 0f)
                     + (sector.getStored(item) / dt);
                 float sat = Math.min(1f, supply / needed);
                 itemSat.put(item, sat);
@@ -449,7 +459,8 @@ public class PlanetNetworkSolver{
                             break;
                         }
                         float outFlow = totalDemand.getOrDefault(outItem, 0f)
-                            + sector.solvedExportRates.getOrDefault(outItem, 0f);
+                            + sector.solvedExportRates.getOrDefault(outItem, 0f)
+                            + sector.externalExportDemands.getOrDefault(outItem, 0f);
                         float pot = Math.max(out.getValue() * preBpEff, potentialProd.getOrDefault(outItem, 0f));
                         if(outFlow > 1e-5f && pot > 1e-5f){
                             maxNeededRatio = Math.max(maxNeededRatio, Math.min(1f, outFlow / pot));
@@ -489,6 +500,11 @@ public class PlanetNetworkSolver{
 
         for(Map.Entry<String, Float> in : incomingImports.entrySet()){
             sector.solvedNetRates.put(in.getKey(), sector.solvedNetRates.getOrDefault(in.getKey(), 0f) + in.getValue());
+        }
+        for(Map.Entry<String, Float> extIn : sector.externalImportRates.entrySet()){
+            if(extIn.getValue() > 1e-5f){
+                sector.solvedNetRates.put(extIn.getKey(), sector.solvedNetRates.getOrDefault(extIn.getKey(), 0f) + extIn.getValue());
+            }
         }
 
         for(ProductionNode node : sector.nodes){

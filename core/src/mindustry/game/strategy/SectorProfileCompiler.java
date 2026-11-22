@@ -71,8 +71,24 @@ public class SectorProfileCompiler{
                         node.measuredEfficiency = blendEfficiency(node.measuredEfficiency, eff, node.count);
                         compiledRawOutputs.put(item.name, compiledRawOutputs.getOrDefault(item.name, 0f) + rate * eff);
                     }
+                }else if(build instanceof BeamDrill.BeamDrillBuild beamBuild && block instanceof BeamDrill beam){
+                    Item item = beamBuild.lastItem;
+                    if(item != null && beamBuild.facingAmount > 0){
+                        float optEff = Math.max(0f, Math.min(1f, beamBuild.optionalEfficiency));
+                        float boostMult = 1f + (beam.optionalBoostIntensity - 1f) * optEff;
+                        float rate = (60f / Math.max(1f, beam.getDrillTime(item))) * beamBuild.facingAmount * boostMult * timeScale;
+                        String key = "beamdrill:" + block.name + ":" + item.name;
+                        ProductionNode node = getOrCreateNode(mergedNodes, key, block.name);
+                        node.count++;
+                        node.addOutput(item.name, rate);
+                        node.powerConsumePerSec += powerUsePerSec;
+                        node.measuredEfficiency = blendEfficiency(node.measuredEfficiency, eff, node.count);
+                        compiledRawOutputs.put(item.name, compiledRawOutputs.getOrDefault(item.name, 0f) + rate * eff);
+                    }
                 }else if(build instanceof GenericCrafter.GenericCrafterBuild && block instanceof GenericCrafter crafter){
-                    float cyclesPerSec = (60f / Math.max(1f, crafter.craftTime)) * timeScale;
+                    // Preserve >100% attribute/heat efficiency boosts in cyclesPerSec while keeping measuredEfficiency in [0, 1]
+                    float overBoost = Math.max(1f, build.efficiency);
+                    float cyclesPerSec = (60f / Math.max(1f, crafter.craftTime)) * timeScale * overBoost;
                     String key = "crafter:" + block.name;
                     ProductionNode node = getOrCreateNode(mergedNodes, key, block.name);
                     node.count++;
@@ -171,6 +187,10 @@ public class SectorProfileCompiler{
         if(hasFallback){
             fallback.measuredEfficiency = 1f;
             profile.nodes.add(fallback);
+        }
+
+        if(universe != null && universe.strategy != null){
+            universe.strategy.notifyCompileSector(sector, info, profile);
         }
 
         info.strategyProfile = profile;

@@ -14,6 +14,7 @@ public class CampaignRules{
     public boolean rtsAI;
     public boolean clearSectorOnLose;
     public boolean pauseDisabled;
+    /** Retained for save JSON backward compatibility; real-time global settlement is always active. */
     public boolean globalLogistics = true;
     public boolean slowCombatPace = true;
 

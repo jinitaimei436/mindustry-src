@@ -369,7 +369,8 @@ public class SectorConveyorPort extends Block{
             if(isCampaignOwned()){
                 ensureRegistered();
                 SectorPortRecord rec = SectorConveyorManager.get().getPort(state.getSector(), true, portNumber);
-                if(rec != null && rec.enqueue(item.id)){
+                if(rec != null && rec.enqueue((int)item.id)){
+                    rec.recordAcceptedItem((int)item.id);
                     if(items != null) items.add(item, 1);
                 }
             }else{

@@ -88,9 +88,6 @@ public class SectorInfo{
     /** Compiled lightweight production & logistics profile for real-time background simulation. */
     public @Nullable SectorStrategyProfile strategyProfile;
 
-    /** Temporary seq for last imported items. Do not use. */
-    public transient ItemSeq lastImported = new ItemSeq();
-
     /** Counter refresh state. */
     private transient Interval time = new Interval();
     /** Core item storage input/output deltas. */
@@ -252,7 +249,7 @@ public class SectorInfo{
             export.clear();
         }
 
-        if(sector.planet != null && sector.planet.campaignRules.globalLogistics){
+        if(sector.planet != null){
             SectorProfileCompiler.compileCurrentSector(sector, this);
         }
 

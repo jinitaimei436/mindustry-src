@@ -55,10 +55,35 @@ public class SectorStrategyProfile{
     /** Garrisoned units ready for defense or cross-sector dispatch (reserved for strategic AI). */
     public HashMap<String, Integer> garrisonUnits = new HashMap<>();
 
+    // --- Transient per-tick hooks populated by CrossSectorExtension implementations ---
+
+    /**
+     * Optional externally-supplied power satisfaction in [0, 1] (e.g. from V2.5 Cross-Sector Power Grid).
+     * Negative value (< 0) means use this sector's local PowerGenerator production/consumption only.
+     */
+    public transient float externalPowerSatisfaction = -1f;
+
+    /**
+     * External outgoing item pull rates (items/sec) from cross-sector channels such as V2.8
+     * Cross-Sector Conveyors or future logistics devices, used by storage backpressure so
+     * upstream factories do not stall when core storage is full.
+     */
+    public transient HashMap<String, Float> externalExportDemands = new HashMap<>();
+
+    /**
+     * Optional continuous external incoming item rates (items/sec) injected by future continuous
+     * cross-sector channels (discrete FIFO channels deposit directly into storedItems instead).
+     */
+    public transient HashMap<String, Float> externalImportRates = new HashMap<>();
+
     // --- Runtime solved readouts (not required for persistence) ---
 
     /** Solved power satisfaction ratio in [0, 1]. */
     public transient float solvedPowerSatisfaction = 1f;
+
+    /** Solved local power generation and consumption (power/sec) from compiled nodes. */
+    public transient float solvedLocalPowerProd = 0f;
+    public transient float solvedLocalPowerCons = 0f;
 
     /** Solved net item rate into core storage (items/sec, may be negative). */
     public transient HashMap<String, Float> solvedNetRates = new HashMap<>();
@@ -76,6 +101,12 @@ public class SectorStrategyProfile{
     public transient String bottleneckTag = "";
 
     public SectorStrategyProfile(){
+    }
+
+    public void clearExternalStepChannels(){
+        externalPowerSatisfaction = -1f;
+        externalExportDemands.clear();
+        externalImportRates.clear();
     }
 
     public SectorStrategyProfile(int sectorId){

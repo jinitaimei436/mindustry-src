@@ -26,7 +26,7 @@ public class MultiSectorCoopTests{
 
     @Test
     void versionForkTagIsV2(){
-        assertEquals("v3.0", Version.forkVersion);
+        assertEquals("v3.1", Version.forkVersion);
     }
 
     @Test

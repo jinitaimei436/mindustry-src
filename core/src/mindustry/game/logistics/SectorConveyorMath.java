@@ -16,9 +16,10 @@ import java.util.*;
  * - Multi-item FIFO queues preserve arrival order; full receiver buffers apply lossless backpressure.
  */
 public final class SectorConveyorMath{
-    public static final int STREAM_VERSION = 1;
+    public static final int STREAM_VERSION = 2;
 
     public static final int MAX_SENDERS_PER_SECTOR = 4;
+    public static final int MAX_FEED_PATTERN_SIZE = 16;
 
     public static final int TIER_JUNIOR = 1;
     public static final int TIER_SENIOR = 2;
@@ -201,6 +202,18 @@ public final class SectorConveyorMath{
         public float recentTotalRate = 0f;
         /** Per-item measured throughput (itemId -> items/sec) over the latest 1-second window. */
         public final java.util.Map<Integer, Float> itemRatesPerSec = new LinkedHashMap<>();
+        /**
+         * Ordered ring sample of recently accepted item IDs on a sender port (max {@link #MAX_FEED_PATTERN_SIZE}).
+         * Enables background real-time settlement to keep refilling a background sender with the exact
+         * single or mixed item ratio its foreground belt supplied, without fabricating un-belted items.
+         */
+        public final ArrayList<Integer> backgroundFeedPattern = new ArrayList<>();
+        /** Transient cursor for round-robin sampling of {@link #backgroundFeedPattern}. */
+        public int backgroundFeedCursor = 0;
+        /** Transient fractional accumulator for background sender refill from sector storage. */
+        public float backgroundPullCarry = 0f;
+        /** Transient fractional accumulator for background receiver drain into sector storage. */
+        public float backgroundDrainCarry = 0f;
 
         // Sliding 1-second telemetry accumulator (transient)
         private final java.util.Map<Integer, Integer> windowCounts = new LinkedHashMap<>();
@@ -258,6 +271,60 @@ public final class SectorConveyorMath{
             if(itemId < 0) return;
             lastItemId = itemId;
             windowCounts.merge(itemId, 1, Integer::sum);
+        }
+
+        /** Records an item physically accepted onto a sender port so background settlement remembers its feed mix. */
+        public void recordAcceptedItem(int itemId){
+            if(itemId < 0) return;
+            lastItemId = itemId;
+            if(backgroundFeedPattern.size() >= MAX_FEED_PATTERN_SIZE){
+                backgroundFeedPattern.remove(0);
+                if(backgroundFeedCursor > 0){
+                    backgroundFeedCursor--;
+                }
+            }
+            backgroundFeedPattern.add(itemId);
+        }
+
+        /** Seeds background feed pattern from existing FIFO / lastItemId if none has been recorded yet (old saves). */
+        public void seedFeedPatternIfEmpty(){
+            if(!backgroundFeedPattern.isEmpty()) return;
+            if(!fifo.isEmpty()){
+                for(int id : fifo){
+                    if(id >= 0){
+                        backgroundFeedPattern.add(id);
+                        if(backgroundFeedPattern.size() >= MAX_FEED_PATTERN_SIZE) break;
+                    }
+                }
+            }else if(lastItemId >= 0){
+                backgroundFeedPattern.add(lastItemId);
+            }
+        }
+
+        /** Returns the active feed pattern (seeding from FIFO/lastItemId if needed for legacy saves). */
+        public List<Integer> getEffectiveFeedPattern(){
+            seedFeedPatternIfEmpty();
+            return backgroundFeedPattern;
+        }
+
+        /** Cycles through the observed feed pattern to pick the next item ID to pull in background settlement. */
+        public int nextFeedItemId(){
+            List<Integer> pattern = getEffectiveFeedPattern();
+            int size = pattern.size();
+            if(size == 0) return -1;
+            int idx = ((backgroundFeedCursor % size) + size) % size;
+            backgroundFeedCursor = (idx + 1) % size;
+            return pattern.get(idx);
+        }
+
+        public void replaceFeedPattern(List<Integer> items){
+            backgroundFeedPattern.clear();
+            backgroundFeedCursor = 0;
+            if(items == null) return;
+            for(int i = 0; i < items.size() && backgroundFeedPattern.size() < MAX_FEED_PATTERN_SIZE; i++){
+                int id = items.get(i);
+                if(id >= 0) backgroundFeedPattern.add(id);
+            }
         }
 
         /** Advances the 1-second throughput measurement window cleanly. */
@@ -604,12 +671,38 @@ public final class SectorConveyorMath{
          * and advances telemetry windows for background receivers.
          */
         public void stepBackgroundLinks(Set<Integer> activelySimulatedSectorIds, float dtSeconds){
+            stepBackgroundLinks(activelySimulatedSectorIds, null, null, dtSeconds);
+        }
+
+        /**
+         * Power- and freeze-aware variant of {@link #stepBackgroundLinks(Set, float)}.
+         * Senior Senders scale by their source sector's solved power satisfaction; frozen sectors
+         * (e.g. under attack) pause background transfers without losing buffered items.
+         */
+        public void stepBackgroundLinks(
+            Set<Integer> activelySimulatedSectorIds,
+            java.util.Map<Integer, Float> sectorPowerEfficiency,
+            Set<Integer> frozenSectorIds,
+            float dtSeconds
+        ){
             if(dtSeconds <= 0f || ports.isEmpty()) return;
 
             for(SectorConveyorLink link : linksBySender.values()){
                 boolean senderSimulated = activelySimulatedSectorIds != null && activelySimulatedSectorIds.contains(link.senderSectorId);
                 if(!senderSimulated){
-                    stepSenderTransfer(link.senderSectorId, link.senderPortNumber, dtSeconds, 1f);
+                    boolean senderFrozen = frozenSectorIds != null && frozenSectorIds.contains(link.senderSectorId);
+                    boolean receiverFrozen = frozenSectorIds != null && frozenSectorIds.contains(link.receiverSectorId);
+                    SectorPortRecord sender = ports.get(link.senderKey());
+                    float eff = 1f;
+                    if(senderFrozen || receiverFrozen){
+                        eff = 0f;
+                    }else if(sender != null && sender.tier == TIER_SENIOR && sectorPowerEfficiency != null){
+                        Float p = sectorPowerEfficiency.get(link.senderSectorId);
+                        if(p != null){
+                            eff = Math.max(0f, Math.min(1f, p));
+                        }
+                    }
+                    stepSenderTransfer(link.senderSectorId, link.senderPortNumber, dtSeconds, eff);
                 }
             }
 
@@ -658,6 +751,12 @@ public final class SectorConveyorMath{
                     out.writeInt(e.getKey());
                     out.writeFloat(e.getValue());
                 }
+
+                // STREAM_VERSION >= 2: observed background feed pattern
+                out.writeInt(p.backgroundFeedPattern.size());
+                for(int itemId : p.backgroundFeedPattern){
+                    out.writeInt(itemId);
+                }
             }
 
             List<SectorConveyorLink> sortedLinks = new ArrayList<>(linksBySender.values());
@@ -678,7 +777,7 @@ public final class SectorConveyorMath{
         public void readFromStream(DataInput in) throws IOException{
             clear();
             int ver = in.readInt();
-            if(ver != STREAM_VERSION) return;
+            if(ver < 1 || ver > STREAM_VERSION) return;
 
             int portCount = Math.max(0, in.readInt());
             for(int i = 0; i < portCount; i++){
@@ -708,6 +807,16 @@ public final class SectorConveyorMath{
                     rec.backpressurePaused = paused;
                     rec.lastItemId = lastItem;
                     rec.recentTotalRate = totalRate;
+                }
+                if(ver >= 2){
+                    int feedCount = Math.max(0, in.readInt());
+                    List<Integer> feed = new ArrayList<>(feedCount);
+                    for(int j = 0; j < feedCount; j++){
+                        feed.add(in.readInt());
+                    }
+                    if(rec != null){
+                        rec.replaceFeedPattern(feed);
+                    }
                 }
             }
 
