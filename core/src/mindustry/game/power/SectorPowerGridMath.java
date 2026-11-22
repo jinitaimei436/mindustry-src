@@ -601,7 +601,7 @@ public final class SectorPowerGridMath{
                     activeNodes.add(n);
                 }
             }
-            activeNodes.sort(Comparator.comparingInt(n -> n.sectorId));
+            activeNodes.sort((a, b) -> Integer.compare(a.sectorId, b.sectorId));
 
             out.writeInt(activeNodes.size());
             for(SectorPowerNode n : activeNodes){
