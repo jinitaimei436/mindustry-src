@@ -375,7 +375,7 @@ public final class SectorConveyorMath{
                     out.add(p);
                 }
             }
-            out.sort(Comparator.comparingInt(p -> p.portNumber));
+            out.sort((a, b) -> Integer.compare(a.portNumber, b.portNumber));
             return out;
         }
 
