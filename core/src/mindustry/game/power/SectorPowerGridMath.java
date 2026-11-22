@@ -649,4 +649,148 @@ public final class SectorPowerGridMath{
             }
         }
     }
+
+    // ==================== HUB ANIMATION STATE MACHINE ====================
+
+    /** Lifecycle animation states for the Surge Sector Power Hub. */
+    public enum HubAnimState{
+        /** Standby / powered down. */
+        OFFLINE,
+        /** Playing startup sequence (0 -> 1). */
+        STARTING,
+        /** Steady-state operating loop. */
+        RUNNING,
+        /** Playing shutdown sequence (0 -> 1, warmup 1 -> 0). */
+        STOPPING
+    }
+
+    /**
+     * Pure-Java animation state machine for {@code SurgeSectorPowerHub}.
+     * Drives startup, looping running, and shutdown animations smoothly,
+     * including seamless mid-transition reversals without visual pops.
+     */
+    public static class HubAnimationController{
+        public HubAnimState state = HubAnimState.OFFLINE;
+        /** Elapsed ticks in the current state. */
+        public float stateTimer = 0f;
+        /** Normalized [0..1] progress within STARTING or STOPPING (0 in OFFLINE, 1 in RUNNING). */
+        public float phaseProgress = 0f;
+        /** Normalized [0..1] visual intensity: 0 in OFFLINE, 0->1 in STARTING, 1 in RUNNING, 1->0 in STOPPING. */
+        public float warmup = 0f;
+        /** Normalized [0..1) looping cycle progress while in RUNNING state. */
+        public float runCycleProgress = 0f;
+        /** Monotonically increasing animation clock (compatible with Mindustry DrawBlock.totalProgress). */
+        public float totalProgress = 0f;
+
+        /**
+         * Advances the animation controller by {@code deltaTicks}.
+         *
+         * @return true if the {@link HubAnimState} transitioned during this step.
+         */
+        public boolean step(
+            boolean shouldRun,
+            float deltaTicks,
+            float startupDuration,
+            float runCycleDuration,
+            float shutdownDuration
+        ){
+            float dt = Math.max(0f, deltaTicks);
+            float startDur = Math.max(0.001f, startupDuration);
+            float runDur = Math.max(0.001f, runCycleDuration);
+            float stopDur = Math.max(0.001f, shutdownDuration);
+            HubAnimState prev = state;
+
+            switch(state){
+                case OFFLINE -> {
+                    warmup = 0f;
+                    phaseProgress = 0f;
+                    runCycleProgress = 0f;
+                    if(shouldRun){
+                        state = HubAnimState.STARTING;
+                        stateTimer = 0f;
+                        phaseProgress = 0f;
+                    }
+                }
+                case STARTING -> {
+                    if(!shouldRun){
+                        // Smoothly reverse into STOPPING from current warmup level
+                        state = HubAnimState.STOPPING;
+                        phaseProgress = clamp(1f - warmup, 0f, 1f);
+                        stateTimer = phaseProgress * stopDur;
+                    }else{
+                        stateTimer += dt;
+                        totalProgress += dt * 0.5f;
+                        phaseProgress = clamp(stateTimer / startDur, 0f, 1f);
+                        warmup = phaseProgress;
+                        if(stateTimer >= startDur){
+                            state = HubAnimState.RUNNING;
+                            stateTimer = 0f;
+                            phaseProgress = 1f;
+                            warmup = 1f;
+                            runCycleProgress = 0f;
+                        }
+                    }
+                }
+                case RUNNING -> {
+                    if(!shouldRun){
+                        state = HubAnimState.STOPPING;
+                        stateTimer = 0f;
+                        phaseProgress = 0f;
+                        warmup = 1f;
+                    }else{
+                        stateTimer += dt;
+                        totalProgress += dt;
+                        runCycleProgress = (stateTimer % runDur) / runDur;
+                        phaseProgress = 1f;
+                        warmup = 1f;
+                    }
+                }
+                case STOPPING -> {
+                    if(shouldRun){
+                        // Smoothly reverse back into STARTING from current warmup level
+                        state = HubAnimState.STARTING;
+                        phaseProgress = clamp(warmup, 0f, 1f);
+                        stateTimer = phaseProgress * startDur;
+                    }else{
+                        stateTimer += dt;
+                        totalProgress += dt * Math.max(0.05f, warmup) * 0.5f;
+                        phaseProgress = clamp(stateTimer / stopDur, 0f, 1f);
+                        warmup = 1f - phaseProgress;
+                        if(stateTimer >= stopDur){
+                            state = HubAnimState.OFFLINE;
+                            stateTimer = 0f;
+                            phaseProgress = 0f;
+                            warmup = 0f;
+                            runCycleProgress = 0f;
+                        }
+                    }
+                }
+            }
+
+            return state != prev;
+        }
+
+        public void resetOffline(){
+            state = HubAnimState.OFFLINE;
+            stateTimer = 0f;
+            phaseProgress = 0f;
+            warmup = 0f;
+            runCycleProgress = 0f;
+        }
+
+        /** Maps normalized progress [0..1] to a valid frame index [0..frameCount-1], or -1 if empty. */
+        public static int frameIndex(int frameCount, float progress01){
+            if(frameCount <= 0) return -1;
+            float p = clamp(progress01, 0f, 1f);
+            int idx = (int)(p * frameCount);
+            return Math.min(frameCount - 1, Math.max(0, idx));
+        }
+
+        /** Symmetric reverse frame mapping [frameCount-1..0] for reusing startup frames as shutdown animation. */
+        public static int reverseFrameIndex(int frameCount, float progress01){
+            if(frameCount <= 0) return -1;
+            return (frameCount - 1) - frameIndex(frameCount, progress01);
+        }
+    }
 }
+

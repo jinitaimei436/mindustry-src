@@ -174,4 +174,77 @@ public class SectorPowerGridTests{
         assertEquals(8000f, agg.totalBatteryStored, 1e-4f);
         assertEquals(15000f, agg.totalBatteryCapacity, 1e-4f);
     }
+
+    @Test
+    void hubAnimationLifecycleTransitionsStartupRunningShutdownSmoothly(){
+        HubAnimationController ctrl = new HubAnimationController();
+        assertEquals(HubAnimState.OFFLINE, ctrl.state);
+        assertEquals(0f, ctrl.warmup, 1e-4f);
+
+        // Engage hub -> enters STARTING
+        assertTrue(ctrl.step(true, 1f, 10f, 8f, 10f));
+        assertEquals(HubAnimState.STARTING, ctrl.state);
+
+        // Halfway through startup (5 ticks / 10 ticks = 0.5)
+        assertFalse(ctrl.step(true, 5f, 10f, 8f, 10f));
+        assertEquals(HubAnimState.STARTING, ctrl.state);
+        assertEquals(0.5f, ctrl.phaseProgress, 1e-4f);
+        assertEquals(0.5f, ctrl.warmup, 1e-4f);
+
+        // Finish startup -> enters RUNNING
+        assertTrue(ctrl.step(true, 5f, 10f, 8f, 10f));
+        assertEquals(HubAnimState.RUNNING, ctrl.state);
+        assertEquals(1f, ctrl.warmup, 1e-4f);
+
+        // Running loop wraps cleanly across runCycleDuration = 8
+        assertFalse(ctrl.step(true, 2f, 10f, 8f, 10f));
+        assertEquals(0.25f, ctrl.runCycleProgress, 1e-4f);
+        assertFalse(ctrl.step(true, 8f, 10f, 8f, 10f));
+        assertEquals(0.25f, ctrl.runCycleProgress, 1e-4f);
+
+        // Disengage hub -> enters STOPPING
+        assertTrue(ctrl.step(false, 1f, 10f, 8f, 10f));
+        assertEquals(HubAnimState.STOPPING, ctrl.state);
+
+        // Halfway through shutdown (5 ticks / 10 ticks -> phaseProgress 0.5, warmup 0.5)
+        assertFalse(ctrl.step(false, 5f, 10f, 8f, 10f));
+        assertEquals(0.5f, ctrl.phaseProgress, 1e-4f);
+        assertEquals(0.5f, ctrl.warmup, 1e-4f);
+
+        // Finish shutdown -> returns to OFFLINE
+        assertTrue(ctrl.step(false, 5f, 10f, 8f, 10f));
+        assertEquals(HubAnimState.OFFLINE, ctrl.state);
+        assertEquals(0f, ctrl.warmup, 1e-4f);
+    }
+
+    @Test
+    void hubAnimationMidTransitionReversalPreservesWarmupAndFrameIndices(){
+        HubAnimationController ctrl = new HubAnimationController();
+        ctrl.step(true, 0f, 10f, 8f, 10f); // OFFLINE -> STARTING
+        ctrl.step(true, 6f, 10f, 8f, 10f); // warmup = 0.6
+
+        // Abort mid-startup -> seamlessly enters STOPPING at mirrored progress 0.4 (warmup stays 0.6)
+        assertTrue(ctrl.step(false, 0f, 10f, 8f, 10f));
+        assertEquals(HubAnimState.STOPPING, ctrl.state);
+        assertEquals(0.4f, ctrl.phaseProgress, 1e-4f);
+        assertEquals(0.6f, ctrl.warmup, 1e-4f);
+
+        // Advance shutdown by 2 ticks -> phaseProgress = 0.6, warmup = 0.4
+        ctrl.step(false, 2f, 10f, 8f, 10f);
+        assertEquals(0.4f, ctrl.warmup, 1e-4f);
+
+        // Re-engage mid-shutdown -> seamlessly resumes STARTING at progress 0.4
+        assertTrue(ctrl.step(true, 0f, 10f, 8f, 10f));
+        assertEquals(HubAnimState.STARTING, ctrl.state);
+        assertEquals(0.4f, ctrl.phaseProgress, 1e-4f);
+
+        // Forward & reverse frame index clamping and symmetry
+        assertEquals(0, HubAnimationController.frameIndex(4, 0f));
+        assertEquals(1, HubAnimationController.frameIndex(4, 0.25f));
+        assertEquals(3, HubAnimationController.frameIndex(4, 1f));
+        assertEquals(3, HubAnimationController.reverseFrameIndex(4, 0f));
+        assertEquals(2, HubAnimationController.reverseFrameIndex(4, 0.25f));
+        assertEquals(0, HubAnimationController.reverseFrameIndex(4, 1f));
+    }
 }
+
