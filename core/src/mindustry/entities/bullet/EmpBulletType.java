@@ -8,7 +8,7 @@ import mindustry.gen.*;
 
 public class EmpBulletType extends BasicBulletType{
     public float radius = 100f;
-    public float timeIncrease = 2.5f, timeDuration = 60f * 10f;
+    public float timeIncrease = 1.75f, timeDuration = 60f * 10f;
     public float powerDamageScl = 2f, powerSclDecrease = 0.2f;
     public Effect hitPowerEffect = Fx.hitEmpSpark, chainEffect = Fx.chainEmp, applyEffect = Fx.heal;
     public boolean hitUnits = true;

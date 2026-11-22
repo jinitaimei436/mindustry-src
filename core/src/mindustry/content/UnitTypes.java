@@ -2366,7 +2366,7 @@ public class UnitTypes{
                     lightOpacity = 0.7f;
                     unitDamageScl = 0.8f;
                     healPercent = 20f;
-                    timeIncrease = 3f;
+                    timeIncrease = 2f;
                     timeDuration = 60f * 20f;
                     powerDamageScl = 3f;
                     damage = 110;

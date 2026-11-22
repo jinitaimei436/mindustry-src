@@ -18,8 +18,8 @@ import static org.junit.jupiter.api.Assertions.*;
 public class SectorPowerGridTests{
 
     @Test
-    void versionForkTagIsV25(){
-        assertEquals("v2.5", Version.forkVersion);
+    void versionForkTagIsCurrent(){
+        assertEquals("v2.8.1", Version.forkVersion);
     }
 
     @Test

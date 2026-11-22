@@ -19,6 +19,9 @@ public class SerpuloTechTree{
                     node(router, () -> {
                         node(advancedLaunchPad, Seq.with(new SectorComplete(extractionOutpost)), () -> {
                             node(landingPad, () -> {
+                                node(advancedSectorConveyorSender, Seq.with(new Research(basicSectorConveyorSender)), () -> {
+                                    node(advancedSectorConveyorReceiver);
+                                });
                                 node(interplanetaryAccelerator, Seq.with(new SectorComplete(planetaryTerminal)), () -> {
 
                                 });
@@ -57,6 +60,10 @@ public class SerpuloTechTree{
                                     node(armoredConveyor, () -> {
 
                                     });
+                                });
+
+                                node(basicSectorConveyorSender, () -> {
+                                    node(basicSectorConveyorReceiver);
                                 });
                             });
                         });

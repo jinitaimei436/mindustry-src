@@ -20,6 +20,9 @@ public class CampaignPacket extends Packet{
     public static final byte KIND_POWER_GRID_SYNC = 9;
     public static final byte KIND_POWER_LINK_REQUEST = 10;
     public static final byte KIND_POWER_TELEMETRY = 11;
+    public static final byte KIND_CONVEYOR_SYNC = 12;
+    public static final byte KIND_CONVEYOR_LINK_REQUEST = 13;
+    public static final byte KIND_CONVEYOR_TELEMETRY = 14;
 
     public byte kind;
     public byte[] data = new byte[0];

@@ -22,8 +22,8 @@ public class OverdriveProjector extends Block{
     public @Load("@-top") TextureRegion topRegion;
     public float reload = 60f;
     public float range = 80f;
-    public float speedBoost = 1.5f;
-    public float speedBoostPhase = 0.75f;
+    public float speedBoost = 1.25f;
+    public float speedBoostPhase = 0.375f;
     public float useTime = 400f;
     public float phaseRangeBoost = 20f;
     public boolean hasBoost = true;

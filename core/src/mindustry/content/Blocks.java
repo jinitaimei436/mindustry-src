@@ -12,6 +12,7 @@ import mindustry.entities.part.DrawPart.*;
 import mindustry.entities.part.*;
 import mindustry.entities.pattern.*;
 import mindustry.game.*;
+import mindustry.game.logistics.*;
 import mindustry.gen.*;
 import mindustry.graphics.*;
 import mindustry.type.*;
@@ -119,6 +120,7 @@ public class Blocks{
     //transport
     conveyor, titaniumConveyor, plastaniumConveyor, armoredConveyor, distributor, junction, itemBridge, phaseConveyor, sorter, invertedSorter, router,
     overflowGate, underflowGate, unloader, massDriver,
+    basicSectorConveyorSender, basicSectorConveyorReceiver, advancedSectorConveyorSender, advancedSectorConveyorReceiver,
 
     //transport - alternate
     duct, armoredDuct, ductRouter, overflowDuct, underflowDuct, ductBridge, ductUnloader,
@@ -1956,7 +1958,7 @@ public class Blocks{
             consumePower(10f);
             size = 3;
             range = 200f;
-            speedBoost = 2.5f;
+            speedBoost = 1.75f;
             useTime = 300f;
             ambientSoundVolume = 0.12f;
             hasBoost = false;
@@ -2124,6 +2126,92 @@ public class Blocks{
             pulse = true;
             envEnabled |= Env.space;
             consumePower(0.30f);
+        }};
+
+        basicSectorConveyorSender = new SectorConveyorPort("basic-sector-conveyor-sender"){{
+            requirements(Category.distribution, with(
+                Items.titanium, 120,
+                Items.graphite, 100,
+                Items.silicon, 80,
+                Items.metaglass, 60
+            ));
+            size = 3;
+            health = 520;
+            isSender = true;
+            portTier = SectorConveyorMath.TIER_JUNIOR;
+            itemCapacity = SectorConveyorMath.JUNIOR_CAPACITY;
+            transferRate = SectorConveyorMath.JUNIOR_RATE;
+            intakeRate = SectorConveyorMath.PORT_INTAKE_RATE;
+            fallbackSpriteName = "titanium-conveyor";
+            portAccentColor = Pal.accent;
+            localizedName = "初级区块间传送起始端";
+            description = "3x3 方向性跨区块物流起始端（不耗电）。仅背面居中 1 格接收外来物品（60/秒），容量 20，向相邻区块已配对的接收端以 2/秒跨区传输。每个区块初高级起始端合计限建 4 座。";
+        }};
+
+        basicSectorConveyorReceiver = new SectorConveyorPort("basic-sector-conveyor-receiver"){{
+            requirements(Category.distribution, with(
+                Items.titanium, 100,
+                Items.graphite, 80,
+                Items.silicon, 80,
+                Items.metaglass, 60
+            ));
+            size = 3;
+            health = 480;
+            isSender = false;
+            portTier = SectorConveyorMath.TIER_JUNIOR;
+            itemCapacity = SectorConveyorMath.JUNIOR_CAPACITY;
+            transferRate = SectorConveyorMath.JUNIOR_RATE;
+            intakeRate = SectorConveyorMath.PORT_INTAKE_RATE;
+            fallbackSpriteName = "titanium-conveyor";
+            portAccentColor = Pal.heal;
+            localizedName = "初级区块间传送接收端";
+            description = "3x3 方向性跨区块物流接收端（不耗电，不限数量）。以最高 60/秒接收来自相邻起始端的跨区物品，容量 20，仅从正面居中 1 格以 2/秒释放物品。";
+        }};
+
+        advancedSectorConveyorSender = new SectorConveyorPort("advanced-sector-conveyor-sender"){{
+            requirements(Category.distribution, with(
+                Items.titanium, 220,
+                Items.plastanium, 160,
+                Items.thorium, 140,
+                Items.silicon, 180,
+                Items.surgeAlloy, 80,
+                Items.phaseFabric, 40
+            ));
+            size = 4;
+            health = 1150;
+            isSender = true;
+            portTier = SectorConveyorMath.TIER_SENIOR;
+            itemCapacity = SectorConveyorMath.SENIOR_CAPACITY;
+            transferRate = SectorConveyorMath.SENIOR_RATE;
+            intakeRate = SectorConveyorMath.PORT_INTAKE_RATE;
+            hasPower = true;
+            consumesPower = true;
+            consumePower(4f);
+            fallbackSpriteName = "plastanium-conveyor";
+            portAccentColor = Pal.techBlue;
+            localizedName = "高级区块间传送起始端";
+            description = "4x4 方向性高级跨区块物流起始端（耗电 240/秒）。仅背面居中 2 格接收外来物品（60/秒），容量 40，向相邻区块已配对的接收端以最高 4/秒跨区传输（与初级互联时按 2/秒限速）。每区块初高级起始端合计限建 4 座。";
+        }};
+
+        advancedSectorConveyorReceiver = new SectorConveyorPort("advanced-sector-conveyor-receiver"){{
+            requirements(Category.distribution, with(
+                Items.titanium, 180,
+                Items.plastanium, 120,
+                Items.thorium, 100,
+                Items.silicon, 150,
+                Items.surgeAlloy, 60
+            ));
+            size = 4;
+            health = 1050;
+            isSender = false;
+            portTier = SectorConveyorMath.TIER_SENIOR;
+            itemCapacity = SectorConveyorMath.SENIOR_CAPACITY;
+            transferRate = SectorConveyorMath.SENIOR_RATE;
+            intakeRate = SectorConveyorMath.PORT_INTAKE_RATE;
+            fallbackSpriteName = "plastanium-conveyor";
+            portAccentColor = Pal.lancerLaser;
+            localizedName = "高级区块间传送接收端";
+            description = "4x4 方向性高级跨区块物流接收端（不耗电，不限数量）。以最高 60/秒接收来自相邻起始端的跨区物品，容量 40，仅从正面居中 2 格以 4/秒交替释放物品。";
         }};
 
         sorter = new Sorter("sorter"){{
@@ -6856,7 +6944,7 @@ public class Blocks{
             requirements(Category.effect, BuildVisibility.legacyLaunchPadOnly, with(Items.copper, 350, Items.silicon, 140, Items.lead, 200, Items.titanium, 150));
             size = 3;
             itemCapacity = 100;
-            launchTime = 60f * 20;
+            launchTime = 60f * 50;
             hasPower = true;
             acceptMultipleItems = true;
             consumePower(4f);
@@ -6866,7 +6954,7 @@ public class Blocks{
             requirements(Category.effect, BuildVisibility.notLegacyLaunchPadOnly, with(Items.copper, 350, Items.silicon, 250, Items.lead, 300, Items.titanium, 200));
             size = 4;
             itemCapacity = 100;
-            launchTime = 60f * 30;
+            launchTime = 60f * 50;
             liquidCapacity = 40f;
             hasPower = true;
             drawLiquid = Liquids.oil;

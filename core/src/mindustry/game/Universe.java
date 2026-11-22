@@ -9,6 +9,7 @@ import mindustry.game.EventType.*;
 import mindustry.game.Schematic.*;
 import mindustry.game.SectorInfo.*;
 import mindustry.game.coop.*;
+import mindustry.game.logistics.*;
 import mindustry.game.power.*;
 import mindustry.game.strategy.*;
 import mindustry.gen.*;
@@ -32,6 +33,7 @@ public class Universe{
     public Universe(){
         load();
         SectorPowerGridManager.get().init();
+        SectorConveyorManager.get().init();
 
         //update base coverage on capture
         Events.on(SectorCaptureEvent.class, e -> {
@@ -97,6 +99,7 @@ public class Universe{
                         strategy.update(planet, elapsedSec);
                     }
                     SectorPowerGridManager.get().updateGlobalSecond(planet, elapsedSec);
+                    SectorConveyorManager.get().updateGlobalSecond(planet, elapsedSec);
                 }
 
                 //save every few seconds
@@ -319,6 +322,7 @@ public class Universe{
         Core.settings.put("utimei", seconds);
         Core.settings.put("turn", turn);
         SectorPowerGridManager.get().save();
+        SectorConveyorManager.get().save();
     }
 
     private void load(){

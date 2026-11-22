@@ -292,14 +292,18 @@ public class SurgeSectorPowerHub extends PowerNode{
         public void created(){
             super.created();
             anim.resetOffline();
-            registerIfCampaign();
+            if(world == null || !world.isGenerating()){
+                registerIfCampaign();
+            }
         }
 
         @Override
         public void placed(){
             super.placed();
             anim.resetOffline();
-            registerIfCampaign();
+            if(world == null || !world.isGenerating()){
+                registerIfCampaign();
+            }
         }
 
         private void registerIfCampaign(){
@@ -311,6 +315,7 @@ public class SurgeSectorPowerHub extends PowerNode{
         @Override
         public void onRemoved(){
             super.onRemoved();
+            if(world != null && world.isGenerating()) return;
             if(state != null && state.isCampaign() && state.hasSector() && team == state.rules.defaultTeam){
                 // Only unregister if no other hub remains for this team in this sector
                 if(!hasExistingHub(team, tile)){

@@ -16,6 +16,7 @@ import mindustry.game.coop.CampaignChunkTransport.*;
 import mindustry.game.coop.CampaignPermissions.*;
 import mindustry.game.coop.RemoteSectorBridge.*;
 import mindustry.game.coop.SectorOccupancy.*;
+import mindustry.game.logistics.*;
 import mindustry.game.power.*;
 import mindustry.gen.*;
 import mindustry.io.*;
@@ -562,6 +563,25 @@ public class MultiSectorCoordinator{
         }
     }
 
+    /** V2.8: Client requests the authoritative Host to bind or unbind a 1-to-1 cross-sector conveyor link. */
+    public void requestConveyorLinkChange(String planetName, boolean bindOp, int senderSectorId, int senderPort, int receiverSectorId, int receiverPort){
+        if(net == null || !net.isConnectedClient() || planetName == null) return;
+        try{
+            ByteArrayOutputStream baos = new ByteArrayOutputStream(64);
+            DataOutputStream out = new DataOutputStream(baos);
+            out.writeUTF(planetName);
+            out.writeBoolean(bindOp);
+            out.writeInt(senderSectorId);
+            out.writeInt(senderPort);
+            out.writeInt(receiverSectorId);
+            out.writeInt(receiverPort);
+            out.flush();
+            net.send(new CampaignPacket(CampaignPacket.KIND_CONVEYOR_LINK_REQUEST, baos.toByteArray()), true);
+        }catch(IOException e){
+            Log.err("Failed to send V2.8 conveyor link request", e);
+        }
+    }
+
     public void flushBeforeClientDisconnect(){
         if(net != null && net.isDetachedClient() && state.hasSector()){
             Sector sec = state.getSector();
@@ -621,8 +641,9 @@ public class MultiSectorCoordinator{
             strategyBridge.removeSector(lease.key.planetName, lease.key.sectorId);
         }
         chunkTransport.pruneExpired(now, LEASE_TIMEOUT_MS);
-        // Periodically broadcast V2.5 cross-sector power grid telemetry & topology to all connected clients.
+        // Periodically broadcast V2.5 cross-sector power grid & V2.8 conveyor snapshots to all connected clients.
         broadcastPowerGridSnapshot();
+        broadcastConveyorSnapshot();
     }
 
     /** Immediately flushes all queued global-logistics deliveries to active detached guests. */
@@ -664,6 +685,12 @@ public class MultiSectorCoordinator{
                 net.send(new CampaignPacket(CampaignPacket.KIND_POWER_TELEMETRY, powerSnap), true);
             }catch(IOException e){
                 Log.err("Failed to serialize V2.5 detached sector power telemetry", e);
+            }
+            try{
+                byte[] convSnap = SectorConveyorManager.get().serializeLocalSectorState(sec);
+                net.send(new CampaignPacket(CampaignPacket.KIND_CONVEYOR_TELEMETRY, convSnap), true);
+            }catch(IOException e){
+                Log.err("Failed to serialize V2.8 detached sector conveyor telemetry", e);
             }
         }
 
@@ -719,6 +746,29 @@ public class MultiSectorCoordinator{
                             sendHostControl(con, CTRL_INFO_TOAST, out -> out.writeUTF(res > 0 ? "已连接跨区块电网" : "已断开跨区块电网连接"));
                         }else{
                             sendHostControl(con, CTRL_DENIED, out -> out.writeUTF("无法连接：仅相邻且建有巨浪区块电力枢纽的区块可连线"));
+                        }
+                    }
+                }
+                case CampaignPacket.KIND_CONVEYOR_TELEMETRY -> {
+                    PlayerPresence pres = occupancy.getPresence(sender.uuid());
+                    if(pres != null && sender.uuid().equals(occupancy.getLeaseHolder(pres.planetName, pres.sectorId))){
+                        SectorConveyorManager.get().applyRemoteSectorState(packet.data, pres.planetName, pres.sectorId);
+                    }
+                }
+                case CampaignPacket.KIND_CONVEYOR_LINK_REQUEST -> {
+                    try(DataInputStream in = new DataInputStream(new ByteArrayInputStream(packet.data))){
+                        String planetName = in.readUTF();
+                        boolean bindOp = in.readBoolean();
+                        int sSecId = in.readInt();
+                        int sPort = in.readInt();
+                        int rSecId = in.readInt();
+                        int rPort = in.readInt();
+                        int res = SectorConveyorManager.get().applyLinkChangeAuthoritative(planetName, bindOp, sSecId, sPort, rSecId, rPort);
+                        if(res != 0){
+                            broadcastConveyorSnapshot();
+                            sendHostControl(con, CTRL_INFO_TOAST, out -> out.writeUTF(res > 0 ? "已建立跨区块传送带 1 对 1 链接" : "已断开跨区块传送带链接"));
+                        }else{
+                            sendHostControl(con, CTRL_DENIED, out -> out.writeUTF("无法绑定：仅相邻区块且空闲的起始端与接收端可建立 1 对 1 链接"));
                         }
                     }
                 }
@@ -932,6 +982,8 @@ public class MultiSectorCoordinator{
         target.saveInfo();
         occupancy.releaseSectorLease(planetName, sectorId);
         strategyBridge.removeSector(planetName, sectorId);
+        SectorPowerGridManager.get().onSectorLost(target);
+        SectorConveyorManager.get().onSectorLost(target);
         broadcastOccupancyAndSectorSummaries();
         sendHostControl(con, CTRL_SECTOR_ABANDONED, out -> {
             out.writeUTF(planetName);
@@ -995,6 +1047,9 @@ public class MultiSectorCoordinator{
                 }
                 case CampaignPacket.KIND_POWER_GRID_SYNC -> {
                     SectorPowerGridManager.get().applyAllTopologies(packet.data);
+                }
+                case CampaignPacket.KIND_CONVEYOR_SYNC -> {
+                    SectorConveyorManager.get().applyAllTopologies(packet.data);
                 }
                 default -> {}
             }
@@ -1255,6 +1310,7 @@ public class MultiSectorCoordinator{
                 }
             }
             broadcastPowerGridSnapshot();
+            broadcastConveyorSnapshot();
         }catch(IOException e){
             Log.err("Failed to broadcast occupancy snapshot", e);
         }
@@ -1273,6 +1329,22 @@ public class MultiSectorCoordinator{
             }
         }catch(IOException e){
             Log.err("Failed to broadcast V2.5 power grid snapshot", e);
+        }
+    }
+
+    /** V2.8: Broadcasts authoritative planetary cross-sector conveyor topology & live throughput to all guests. */
+    public void broadcastConveyorSnapshot(){
+        if(net == null || !net.server() || guestConnections.isEmpty()) return;
+        try{
+            byte[] payload = SectorConveyorManager.get().serializeAllTopologies();
+            CampaignPacket packet = new CampaignPacket(CampaignPacket.KIND_CONVEYOR_SYNC, payload);
+            for(NetConnection con : guestConnections.values()){
+                if(con != null && con.isConnected()){
+                    con.send(packet, true);
+                }
+            }
+        }catch(IOException e){
+            Log.err("Failed to broadcast V2.8 conveyor snapshot", e);
         }
     }
 

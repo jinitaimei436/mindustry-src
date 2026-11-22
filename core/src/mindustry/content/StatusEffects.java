@@ -153,8 +153,8 @@ public class StatusEffects{
         overdrive = new StatusEffect("overdrive"){{
             color = Pal.accent;
             healthMultiplier = 0.95f;
-            speedMultiplier = 1.15f;
-            damageMultiplier = 1.4f;
+            speedMultiplier = 1.075f;
+            damageMultiplier = 1.2f;
             damage = -0.01f;
             effect = Fx.overdriven;
             permanent = true;
@@ -162,9 +162,9 @@ public class StatusEffects{
 
         overclock = new StatusEffect("overclock"){{
             color = Pal.accent;
-            speedMultiplier = 1.15f;
-            damageMultiplier = 1.15f;
-            reloadMultiplier = 1.25f;
+            speedMultiplier = 1.075f;
+            damageMultiplier = 1.075f;
+            reloadMultiplier = 1.125f;
             effectChance = 0.07f;
             effect = Fx.overclocked;
         }};
