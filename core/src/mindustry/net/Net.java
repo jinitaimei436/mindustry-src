@@ -58,6 +58,8 @@ public class Net{
         Call.registerPackets();
         //V2 multi-sector campaign multiplayer control & sync packet
         registerPacket(CampaignPacket::new);
+        //V2.1 persistent tactical unit formation sync packet
+        registerPacket(FormationPacket::new);
     }
 
     /** Registers a new packet type for serialization. */

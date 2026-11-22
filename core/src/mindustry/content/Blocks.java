@@ -134,7 +134,7 @@ public class Blocks{
 
     //power
     combustionGenerator, thermalGenerator, steamGenerator, differentialGenerator, rtgGenerator, solarPanel, largeSolarPanel, thoriumReactor,
-    impactReactor, battery, batteryLarge, powerNode, powerNodeLarge, surgeTower, diode,
+    impactReactor, battery, batteryLarge, powerNode, powerNodeLarge, surgeTower, surgeSectorPowerHub, diode,
 
     //power - erekir
     turbineCondenser, ventCondenser, chemicalCombustionChamber, pyrolysisGenerator, fluxReactor, neoplasiaReactor,
@@ -2501,6 +2501,21 @@ public class Blocks{
             maxNodes = 2;
             laserRange = 40f;
             schematicPriority = -15;
+        }};
+
+        surgeSectorPowerHub = new SurgeSectorPowerHub("surge-sector-power-hub"){{
+            requirements(Category.power, with(
+                Items.surgeAlloy, 280,
+                Items.phaseFabric, 160,
+                Items.silicon, 350,
+                Items.plastanium, 200,
+                Items.titanium, 300
+            ));
+            size = 4;
+            maxNodes = 20;
+            laserRange = 20f;
+            health = 1800;
+            schematicPriority = -20;
         }};
 
         diode = new PowerDiode("diode"){{

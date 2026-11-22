@@ -16,6 +16,7 @@ import arc.struct.*;
 import arc.util.*;
 import mindustry.*;
 import mindustry.ai.*;
+import mindustry.ai.formation.*;
 import mindustry.ai.types.*;
 import mindustry.annotations.Annotations.*;
 import mindustry.async.*;
@@ -327,7 +328,10 @@ public abstract class InputHandler implements InputProcessor, GestureListener{
             Events.fire(Trigger.unitCommandPosition);
         }
 
-        for(int id : unitIds){
+        //V2.1: Keep persistent formations bound together whenever any member receives a move/attack order
+        int[] effectiveUnitIds = FormationManager.get().expandCommandedUnits(player.team().id, unitIds, teamTarget != null ? teamTarget : posTarget);
+
+        for(int id : effectiveUnitIds){
             Unit unit = Groups.unit.getByID(id);
             if(unit != null && unit.team == player.team()){
 
@@ -375,7 +379,7 @@ public abstract class InputHandler implements InputProcessor, GestureListener{
             for(Unit unit : units){
                 if(unit.controller() instanceof CommandAI ai){
                     //only assign a group when this is not a queued command
-                    if(ai.commandQueue.size == 0 && unitIds.length > 1){
+                    if(ai.commandQueue.size == 0 && effectiveUnitIds.length > 1){
                         int layer = unit.collisionLayer();
 
                         if(layer == -1) layer = 0;
@@ -1142,10 +1146,22 @@ public abstract class InputHandler implements InputProcessor, GestureListener{
             Unit unit = selectedCommandUnit(input.mouseWorldX(), input.mouseWorldY());
             Building build = world.buildWorld(input.mouseWorldX(), input.mouseWorldY());
             if(unit != null){
-                if(!selectedUnits.contains(unit)){
-                    selectedUnits.add(unit);
+                TacticalFormation form = FormationManager.get().getFormationOf(unit);
+                if(form != null){
+                    Seq<Unit> members = FormationManager.get().getLivingMembers(form, new Seq<>());
+                    if(!selectedUnits.contains(unit)){
+                        for(Unit m : members){
+                            if(!selectedUnits.contains(m)) selectedUnits.add(m);
+                        }
+                    }else{
+                        selectedUnits.removeAll(members);
+                    }
                 }else{
-                    selectedUnits.remove(unit);
+                    if(!selectedUnits.contains(unit)){
+                        selectedUnits.add(unit);
+                    }else{
+                        selectedUnits.remove(unit);
+                    }
                 }
                 commandBuildings.clear();
             }else{
@@ -1350,6 +1366,42 @@ public abstract class InputHandler implements InputProcessor, GestureListener{
                             Drawf.limitLine(commandBuild, cpos, commandBuild.hitSize() / 2f, lineLimit, color.write(Tmp.c1).a(alpha));
                             Drawf.square(cpos.x, cpos.y, 3.5f, color.write(Tmp.c1).a(alpha));
                         }
+                    }
+                }
+
+                //V2.1: Draw persistent tactical formation tethers & cohesion rings in command mode
+                if(player != null){
+                    Seq<TacticalFormation> teamForms = FormationManager.get().getTeamFormations(player.team(), new Seq<>());
+                    Seq<Unit> fMembers = new Seq<>();
+                    for(int fi = 0; fi < teamForms.size; fi++){
+                        TacticalFormation form = teamForms.get(fi);
+                        FormationManager.get().getLivingMembers(form, fMembers);
+                        if(fMembers.size < 2) continue;
+
+                        boolean anySelected = false;
+                        for(int mi = 0; mi < fMembers.size; mi++){
+                            if(selectedUnits.contains(fMembers.get(mi))){
+                                anySelected = true;
+                                break;
+                            }
+                        }
+
+                        Color fColor = form.anyBlocked
+                            ? Tmp.c1.set(Pal.remove).a(anySelected ? 0.75f : 0.45f)
+                            : Tmp.c1.set(form.badgeColor()).a(anySelected ? 0.65f : 0.30f);
+
+                        float ax = form.anyBlocked ? form.blockedAnchorX : form.centerX;
+                        float ay = form.anyBlocked ? form.blockedAnchorY : form.centerY;
+
+                        for(int mi = 0; mi < fMembers.size; mi++){
+                            Unit m = fMembers.get(mi);
+                            Drawf.dashLine(fColor, m.x, m.y, ax, ay);
+                        }
+
+                        Lines.stroke(anySelected ? 1.5f : 1f);
+                        Draw.color(fColor);
+                        Lines.dashCircle(ax, ay, Math.max(18f, form.cohesionRadius * 0.75f));
+                        Draw.reset();
                     }
                 }
             }

@@ -5,6 +5,7 @@ import arc.math.*;
 import arc.util.*;
 import mindustry.*;
 import mindustry.ai.*;
+import mindustry.ai.formation.*;
 import mindustry.annotations.Annotations.*;
 import mindustry.content.*;
 import mindustry.core.GameState.*;
@@ -37,6 +38,7 @@ import static mindustry.Vars.*;
 public class Logic implements ApplicationListener{
 
     public Logic(){
+        FormationManager.get().init();
 
         Events.on(BlockDestroyEvent.class, event -> {
             //skip if rule is off
@@ -297,6 +299,7 @@ public class Logic implements ApplicationListener{
     }
 
     public void reset(){
+        FormationManager.get().clear();
         Groups.clear();
         Time.clear();
         Events.fire(new ResetEvent());
@@ -479,6 +482,7 @@ public class Logic implements ApplicationListener{
         if(editor){
             Groups.unit.update(u -> u.isPlayer() || u.spawnedByCore);
         }else{
+            FormationManager.get().update();
             Groups.unit.update();
         }
         PerfCounter.unitUpdate.end();

@@ -14,6 +14,8 @@ import arc.scene.ui.layout.*;
 import arc.struct.*;
 import arc.util.*;
 import mindustry.ai.*;
+import mindustry.ai.formation.*;
+import mindustry.ai.formation.TacticalFormation.*;
 import mindustry.ai.types.*;
 import mindustry.content.*;
 import mindustry.core.*;
@@ -26,6 +28,7 @@ import mindustry.graphics.*;
 import mindustry.input.*;
 import mindustry.type.*;
 import mindustry.ui.*;
+import mindustry.ui.dialogs.*;
 import mindustry.world.*;
 import mindustry.world.blocks.ConstructBlock.*;
 import mindustry.world.meta.*;
@@ -491,8 +494,12 @@ public class PlacementFragment{
                         var stancesOut = new Seq<UnitStance>();
 
                         int[][] countBox = new int[1][0];
+                        int[] lastFormationRevision = {-1};
+                        int[] lastSelectedCount = {-1};
 
                         rebuildCommand = () -> {
+                            lastFormationRevision[0] = FormationManager.get().getUiRevision();
+                            lastSelectedCount[0] = control.input.selectedUnits.size;
                             if(countBox[0].length != content.units().size) countBox[0] = new int[content.units().size];
                             int[] counts = countBox[0];
 
@@ -607,8 +614,11 @@ public class PlacementFragment{
                                         }
                                     }).fillX().padTop(4f).left();
                                 }
+
+                                buildFormationSection(u, units);
                             }else{
                                 u.add(Core.bundle.get("commandmode.nounits")).color(Color.lightGray).growX().center().labelAlign(Align.center).pad(6);
+                                buildFormationSection(u, units);
                             }
                         };
 
@@ -647,7 +657,9 @@ public class PlacementFragment{
                                     }
                                 }
 
-                                if(!usedCommands.equals(availableCommands) || !usedStances.equals(availableStances) || !prevActiveTypes.equals(activeTypes)){
+                                int curRev = FormationManager.get().getUiRevision();
+                                int curCount = control.input.selectedUnits.size;
+                                if(!usedCommands.equals(availableCommands) || !usedStances.equals(availableStances) || !prevActiveTypes.equals(activeTypes) || curRev != lastFormationRevision[0] || curCount != lastSelectedCount[0]){
                                     rebuildCommand.run();
                                     prevActiveTypes.set(activeTypes);
                                 }
@@ -813,5 +825,182 @@ public class PlacementFragment{
         }
 
         return null;
+    }
+
+    private void buildFormationSection(Table u, Seq<Unit> units){
+        if(player == null) return;
+        FormationManager fm = FormationManager.get();
+
+        Seq<TacticalFormation> selectedForms = new Seq<>();
+        int unitsInFormation = 0;
+        for(int i = 0; i < units.size; i++){
+            TacticalFormation f = fm.getFormationOf(units.get(i));
+            if(f != null){
+                unitsInFormation++;
+                if(!selectedForms.contains(f)){
+                    selectedForms.add(f);
+                }
+            }
+        }
+
+        boolean exactSingleFormation = units.size > 0 && selectedForms.size == 1 && unitsInFormation == units.size;
+        boolean canCreateFormation = units.size >= 2 && !exactSingleFormation;
+        Seq<TacticalFormation> teamForms = fm.getTeamFormations(player.team(), new Seq<>());
+
+        if(!exactSingleFormation && !canCreateFormation && selectedForms.isEmpty() && teamForms.isEmpty()){
+            return;
+        }
+
+        u.row();
+        u.add(new Image(Tex.whiteui)).height(3f).color(Pal.gray).pad(6f).growX().row();
+
+        if(exactSingleFormation){
+            TacticalFormation form = selectedForms.first();
+            String hex = form.badgeColor().toString();
+            u.table(header -> {
+                header.left();
+                header.label(() -> "[#" + hex + "]编队 #" + form.id + " [lightgray](" + form.size() + ")").left().growX();
+                header.label(() -> {
+                    if(form.anyBlocked){
+                        return "[scarlet]受阻等待";
+                    }
+                    float tilesPerSec = form.slowestSpeed * 60f / tilesize;
+                    return "[lightgray]" + Strings.autoFixed(tilesPerSec, 1) + "格/秒";
+                }).right();
+            }).growX().padLeft(4f).padRight(4f).padBottom(4f).row();
+
+            u.table(actions -> {
+                actions.defaults().height(38f).pad(2f).growX();
+                actions.button("全选", Icon.unitsSmall, Styles.cleart, () -> {
+                    Seq<Unit> members = fm.getLivingMembers(form, new Seq<>());
+                    control.input.selectedUnits.set(members);
+                    Events.fire(Trigger.unitCommandChange);
+                }).tooltip("选中该编队全部成员");
+
+                actions.button("成员", Icon.edit, Styles.cleart, () -> {
+                    showFormationMembersDialog(form);
+                }).tooltip("查看成员或移出单个士兵");
+
+                actions.button("[scarlet]解散", Icon.trash, Styles.cleart, () -> {
+                    fm.requestDisbandFormation(form.id);
+                    ui.showInfoFade("已解散编队 #" + form.id);
+                    Events.fire(Trigger.unitCommandChange);
+                }).tooltip("解散整个编队");
+            }).growX().row();
+        }else if(canCreateFormation){
+            String label = selectedForms.isEmpty()
+                ? "建立编队 (" + units.size + ")"
+                : "合并为新编队 (" + units.size + ")";
+            u.button(label, Icon.link, Styles.cleart, () -> {
+                TacticalFormation created = fm.requestCreateFormation(units);
+                if(created != null){
+                    ui.showInfoFade("已建立编队 #" + created.id + " (" + created.size() + " 单位)");
+                }else if(net.client()){
+                    ui.showInfoFade("已请求建立编队");
+                }
+                Events.fire(Trigger.unitCommandChange);
+            }).growX().height(38f).pad(2f).row();
+        }
+
+        if(teamForms.size > 0){
+            u.table(list -> {
+                list.left();
+                int col = 0;
+                for(int i = 0; i < teamForms.size; i++){
+                    TacticalFormation f = teamForms.get(i);
+                    String hex = f.badgeColor().toString();
+                    boolean active = selectedForms.size == 1 && selectedForms.first() == f && exactSingleFormation;
+                    list.button("", Styles.clearTogglet, () -> {
+                        Seq<Unit> members = fm.getLivingMembers(f, new Seq<>());
+                        if(members.size > 0){
+                            control.input.selectedUnits.set(members);
+                            Events.fire(Trigger.unitCommandChange);
+                        }
+                    }).update(btn -> {
+                        String warn = f.anyBlocked ? " [scarlet]!" : "";
+                        btn.setText("[#" + hex + "]#" + f.id + " [white](" + f.size() + ")" + warn);
+                    }).checked(active).height(34f).minWidth(68f).pad(2f).growX();
+
+                    if(++col % 3 == 0){
+                        list.row();
+                    }
+                }
+            }).growX().padTop(2f).row();
+        }
+    }
+
+    private void showFormationMembersDialog(TacticalFormation formation){
+        if(formation == null) return;
+        FormationManager fm = FormationManager.get();
+        BaseDialog dialog = new BaseDialog("编队 #" + formation.id + " 成员管理");
+        dialog.closeOnBack();
+
+        Runnable[] rebuild = {null};
+        rebuild[0] = () -> {
+            dialog.cont.clear();
+            TacticalFormation live = fm.getFormation(formation.id);
+            Seq<Unit> members = fm.getLivingMembers(live, new Seq<>());
+            if(live == null || members.size < 2){
+                dialog.hide();
+                return;
+            }
+
+            float syncTilesPerSec = live.slowestSpeed * 60f / tilesize;
+            dialog.cont.add("[accent]编队 #" + live.id + "  [white]共 " + members.size + " 名成员  [lightgray]同步限速: " + Strings.autoFixed(syncTilesPerSec, 1) + " 格/秒")
+                .padBottom(4f).row();
+
+            if(live.anyBlocked){
+                dialog.cont.add("[scarlet]当前存在地形受阻成员，其余队友正在其身旁协同等待").padBottom(6f).row();
+            }
+
+            dialog.cont.image(Tex.whiteui, Pal.accent).fillX().height(3f).padBottom(6f).row();
+
+            dialog.cont.pane(list -> {
+                list.top().left();
+                for(int i = 0; i < members.size; i++){
+                    Unit member = members.get(i);
+                    MemberState st = live.states.get(member.id);
+                    boolean blocked = st != null && st.blocked;
+                    float ownSpeed = member.speed() * 60f / tilesize;
+                    String domain = FormationManager.domainLabel(member);
+
+                    list.table(Tex.button, row -> {
+                        row.left().margin(4f);
+                        row.image(member.type.uiIcon).size(32f).scaling(Scaling.fit).padRight(8f);
+                        row.table(info -> {
+                            info.left();
+                            String blockedTag = blocked ? " [scarlet][受阻]" : "";
+                            info.add(member.type.localizedName + " [lightgray][" + domain + "]" + blockedTag).left().row();
+                            info.add("[lightgray]血量 " + (int)member.health + "/" + (int)member.maxHealth + " · 移速 " + Strings.autoFixed(ownSpeed, 1) + "格/秒")
+                                .color(Color.lightGray).left();
+                        }).growX().padRight(8f);
+
+                        row.button(Icon.zoom, Styles.clearNonei, () -> {
+                            Core.camera.position.set(member.x, member.y);
+                            dialog.hide();
+                        }).size(42f).tooltip("定位到该士兵");
+
+                        row.button("[scarlet]移出", Icon.cancelSmall, Styles.cleart, () -> {
+                            fm.requestRemoveMember(live.id, member.id);
+                            control.input.selectedUnits.remove(member);
+                            Events.fire(Trigger.unitCommandChange);
+                            rebuild[0].run();
+                        }).height(42f).minWidth(86f).padLeft(4f).tooltip("仅将该士兵移出编队");
+                    }).growX().minWidth(360f).padBottom(4f).row();
+                }
+            }).growX().maxHeight(420f).row();
+        };
+
+        dialog.buttons.defaults().size(180f, 54f).pad(4f);
+        dialog.addCloseButton();
+        dialog.buttons.button("[scarlet]解散编队", Icon.trash, () -> {
+            fm.requestDisbandFormation(formation.id);
+            ui.showInfoFade("已解散编队 #" + formation.id);
+            Events.fire(Trigger.unitCommandChange);
+            dialog.hide();
+        });
+
+        rebuild[0].run();
+        dialog.show();
     }
 }

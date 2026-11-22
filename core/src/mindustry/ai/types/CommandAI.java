@@ -5,6 +5,7 @@ import arc.math.geom.*;
 import arc.struct.*;
 import arc.util.*;
 import mindustry.ai.*;
+import mindustry.ai.formation.*;
 import mindustry.core.*;
 import mindustry.entities.*;
 import mindustry.entities.units.*;
@@ -175,10 +176,16 @@ public class CommandAI extends AIController{
         return hasStance(UnitStance.boost) || command == UnitCommand.enterPayloadCommand;
     }
 
+    @Override
+    public float prefSpeed(){
+        return FormationManager.get().resolveSpeed(unit, super.prefSpeed());
+    }
+
     public void clearCommands(){
         commandQueue.clear();
         targetPos = null;
         attackTarget = null;
+        FormationManager.get().onUnitCommandsCleared(unit);
     }
 
     void tryPickupUnit(Payloadc pay){
@@ -275,12 +282,19 @@ public class CommandAI extends AIController{
         float engageRange = unit.type.range - 10f;
         boolean withinAttackRange = attackTarget != null && unit.within(attackTarget, engageRange) && !ramming;
 
-        if(targetPos != null){
+        boolean regrouping = FormationManager.get().getRegroupTarget(unit, Tmp.v4);
+        boolean formationHold = FormationManager.get().shouldHoldPosition(unit);
+
+        if(targetPos != null || regrouping){
             boolean move = true, isFinalPoint = commandQueue.size == 0;
             //actual final point that it needs to go to
-            currentDestination.set(targetPos);
-            targetBuild = world.buildWorld(targetPos.x, targetPos.y);
-            if(unit.isGrounded() && targetBuild != null && targetBuild.tile.solid() && targetBuild.block.acceptsUnitPayloads && unit.type.pathCostId != ControlPathfinder.costIdLegs && !ramming){
+            if(regrouping){
+                currentDestination.set(Tmp.v4);
+            }else{
+                currentDestination.set(targetPos);
+            }
+            targetBuild = world.buildWorld(currentDestination.x, currentDestination.y);
+            if(!regrouping && unit.isGrounded() && targetBuild != null && targetBuild.tile.solid() && targetBuild.block.acceptsUnitPayloads && unit.type.pathCostId != ControlPathfinder.costIdLegs && !ramming){
                 Tile best = targetBuild.findClosestEdge(unit, Tile::solid);
                 if(best != null){
                     currentDestination.set(best);
@@ -292,17 +306,17 @@ public class CommandAI extends AIController{
             offsetedDestination.set(currentDestination);
 
             //the enter payload command requires an exact position
-            if(group != null && group.valid && groupIndex < group.units.size && command != UnitCommand.enterPayloadCommand){
+            if(!regrouping && group != null && group.valid && groupIndex < group.units.size && command != UnitCommand.enterPayloadCommand){
                 offsetedDestination.add(group.positions[groupIndex * 2], group.positions[groupIndex * 2 + 1]);
             }
 
-            Building targetBuild = world.buildWorld(targetPos.x, targetPos.y);
+            Building targetBuild = world.buildWorld(currentDestination.x, currentDestination.y);
 
-            if(
+            if(!regrouping && (
                 (hasStance(UnitStance.patrol) && !hasStance(UnitStance.pursueTarget) && target != null && unit.within(target, unit.type.range - 2f) && !unit.type.circleTarget) ||
                 (command == UnitCommand.enterPayloadCommand && unit.within(currentDestination, 4f) || (targetBuild != null && !unit.type.circleTarget && unit.within(targetBuild, targetBuild.block.size * tilesize/2f * 0.9f))) ||
                 (command == UnitCommand.loopPayloadCommand && unit.within(offsetedDestination, 10f))
-            ){
+            )){
                 move = false;
             }
 
@@ -315,7 +329,7 @@ public class CommandAI extends AIController{
                     blockingUnit = Units.nearbyCheck(unit.x + dstPos.x - radius/2f, unit.y + dstPos.y - radius/2f, radius, radius,
                         u -> u != unit && u.within(unit, u.hitSize/2f + unit.hitSize/2f + margin) && u.controller() instanceof CommandAI ai && ai.targetPos != null &&
                         //stop for other unit only if it's closer to the target
-                        (ai.targetPos.equals(targetPos) && u.dst2(targetPos) < unit.dst2(targetPos)) &&
+                        (targetPos != null && ai.targetPos.equals(targetPos) && u.dst2(targetPos) < unit.dst2(targetPos)) &&
                         //don't stop if they're facing the same way
                         !Angles.within(unit.rotation, u.rotation, 15f) &&
                         //must be near an obstacle, stopping in open ground is pointless
@@ -338,18 +352,22 @@ public class CommandAI extends AIController{
 
                 //if the unit is next to the target, stop asking the pathfinder how to get there, it's a waste of CPU
                 //TODO maybe stop moving too?
-                if(withinAttackRange){
+                if(withinAttackRange && !regrouping){
                     move = true;
                     moveTarget.set(offsetedDestination);
                 }else{
                     var result = controlPath.getPathPosition(unit, offsetedDestination, currentDestination);
 
                     unreachable = result.unreachable;
+                    boolean navalEdgeBlocked = unit.type.naval && result.next != null && !unit.canPass(result.next.x, result.next.y);
+                    if(!regrouping){
+                        FormationManager.get().reportMemberPathStatus(unit, result.move, unreachable, navalEdgeBlocked);
+                    }
                     move &= result.move && (!blockingUnit || timeSpentBlocked > maxBlockTime);
                     if(result.move) moveTarget.set(result.dest);
 
                     //do not wiggle in place
-                    if(unit.type.naval && result.next != null && !unit.canPass(result.next.x, result.next.y) && move && unit.tileOn() == world.tileWorld(moveTarget.x, moveTarget.y)){
+                    if(navalEdgeBlocked && move && unit.tileOn() == world.tileWorld(moveTarget.x, moveTarget.y)){
                         move = false;
                     }
                 }
@@ -360,7 +378,7 @@ public class CommandAI extends AIController{
                 isFinalPoint &= offsetedDestination.epsilonEquals(moveTarget, 4.1f);
 
                 //if the path is invalid, stop trying and record the end as unreachable
-                if(unit.team.isAI() && (unreachable || unit.isPathImpassable(World.toTile(offsetedDestination.x), World.toTile(offsetedDestination.y)))){
+                if(!regrouping && unit.team.isAI() && (unreachable || unit.isPathImpassable(World.toTile(offsetedDestination.x), World.toTile(offsetedDestination.y)))){
                     if(attackTarget instanceof Building build){
                         unreachableBuildings.addUnique(build.pos());
                     }
@@ -372,19 +390,24 @@ public class CommandAI extends AIController{
                 moveTarget.set(offsetedDestination);
             }
 
-            if(command == UnitCommand.loopPayloadCommand){
+            if(command == UnitCommand.loopPayloadCommand && !regrouping){
                 alwaysArrive = true;
             }
 
+            // V2.1 persistent formation cooperative waiting: hold position beside blocked teammate(s).
+            if(formationHold && !regrouping){
+                move = false;
+            }
+
             if(move){
-                if(unit.type.circleTarget && attackTarget != null){
+                if(!regrouping && unit.type.circleTarget && attackTarget != null){
                     target = attackTarget;
                     circleAttack(unit.type.circleTargetRadius);
                 }else{
                     moveTo(moveTarget,
-                    withinAttackRange ? engageRange :
+                    (!regrouping && withinAttackRange) ? engageRange :
                     unit.isGrounded() ? 0f :
-                    attackTarget != null && !ramming ? engageRange : 0f,
+                    (!regrouping && attackTarget != null && !ramming) ? engageRange : 0f,
                     unit.isFlying() ? 40f : 100f, false, null, isFinalPoint || alwaysArrive);
                 }
             }
@@ -400,15 +423,15 @@ public class CommandAI extends AIController{
                 faceTarget();
             }
 
-            //reached destination, end pathfinding
-            if(attackTarget == null && (unit.within(offsetedDestination, command.exactArrival && commandQueue.size == 0 ? 1f : Math.max(5f, unit.hitSize / 2f)) ||
+            //reached destination, end pathfinding (skip when regrouping back to a blocked teammate)
+            if(!regrouping && !formationHold && attackTarget == null && targetPos != null && (unit.within(offsetedDestination, command.exactArrival && commandQueue.size == 0 ? 1f : Math.max(5f, unit.hitSize / 2f)) ||
                 //for circling units, it doesn't need to reach the exact waypoint.
                 (!unit.type.omniMovement && unit.type.flying && !unit.type.rotateMoveFirst && !command.exactArrival && Angles.angleDist(unit.angleTo(offsetedDestination), unit.rotation) > 60f &&
                     unit.within(offsetedDestination, Math.min(50f, 360f / unit.type.rotateSpeed * unit.type.speed / (Mathf.pi * 2f)))))){
                 finishPath();
             }
 
-            if(stopWhenInRange && targetPos != null && unit.within(offsetedDestination, engageRange * 0.9f)){
+            if(!regrouping && !formationHold && stopWhenInRange && targetPos != null && unit.within(offsetedDestination, engageRange * 0.9f)){
                 finishPath();
                 stopWhenInRange = false;
             }

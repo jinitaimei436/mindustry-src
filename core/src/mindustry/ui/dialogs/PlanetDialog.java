@@ -27,6 +27,8 @@ import mindustry.game.Objectives.*;
 import mindustry.game.SectorInfo.*;
 import mindustry.game.*;
 import mindustry.game.coop.*;
+import mindustry.game.power.*;
+import mindustry.game.power.SectorPowerGridMath.*;
 import mindustry.gen.*;
 import mindustry.graphics.*;
 import mindustry.graphics.g3d.PlanetGrid.*;
@@ -74,6 +76,10 @@ public class PlanetDialog extends BaseDialog implements PlanetInterfaceRenderer{
     private Texture[] planetTextures;
     private Element mainView;
     private SectorSelectDialog selectDialog = new SectorSelectDialog();
+    /** V2.5: Planet Power View overlay state ("电力视野") for cross-sector power grid management. */
+    public boolean powerViewMode = false;
+    public @Nullable Sector powerLinkSource = null;
+    private int lastPowerGridRevision = -1;
 
     public PlanetDialog(){
         super("", Styles.fullDialog);
@@ -94,6 +100,9 @@ public class PlanetDialog extends BaseDialog implements PlanetInterfaceRenderer{
                     if(showing() && newPresets.size > 1){
                         //clear all except first, which is the last sector.
                         newPresets.truncate(1);
+                    }else if(powerLinkSource != null){
+                        powerLinkSource = null;
+                        updateSelected();
                     }else if(selected != null){
                         selectSector(null);
                     }else{
@@ -256,7 +265,9 @@ public class PlanetDialog extends BaseDialog implements PlanetInterfaceRenderer{
         mode = look;
         state.otherCamPos = null;
         selected = hovered = launchSector = null;
+        powerLinkSource = null;
         launching = false;
+        SectorPowerGridManager.get().syncCurrentSectorHubStatus();
 
         zoom = 1f;
         state.zoom = 1f;
@@ -365,6 +376,8 @@ public class PlanetDialog extends BaseDialog implements PlanetInterfaceRenderer{
         state.uiAlpha = 0f;
 
         mode = planetLaunch;
+        powerViewMode = false;
+        powerLinkSource = null;
 
         updateSelected();
         rebuildExpand();
@@ -379,6 +392,8 @@ public class PlanetDialog extends BaseDialog implements PlanetInterfaceRenderer{
     public void showSelect(Sector sector, Cons<Sector> listener){
         selected = null;
         hovered = null;
+        powerViewMode = false;
+        powerLinkSource = null;
         launching = false;
         this.listener = listener;
 
@@ -508,6 +523,23 @@ public class PlanetDialog extends BaseDialog implements PlanetInterfaceRenderer{
             }
         }
 
+        //V2.5: Power View highlights for selected hub origin and linkable adjacent hub sectors
+        if(powerViewMode && mode == look && state.uiAlpha > 0.01f){
+            SectorPowerGridManager pm = SectorPowerGridManager.get();
+            if(powerLinkSource != null && powerLinkSource.planet == planet){
+                planets.drawSelection(powerLinkSource, Tmp.c1.set(Pal.powerLight).a(state.uiAlpha), 0.048f, 0.003f);
+                for(Sector neighbor : powerLinkSource.near()){
+                    if(pm.hasHub(neighbor)){
+                        boolean linked = pm.areLinked(powerLinkSource, neighbor);
+                        Color col = linked
+                            ? Tmp.c1.set(Pal.heal).a(state.uiAlpha * 0.9f)
+                            : Tmp.c1.set(Pal.accent).a(state.uiAlpha * (0.55f + Mathf.absin(Time.time, 6f, 0.45f)));
+                        planets.drawSelection(neighbor, col, 0.038f, 0.0025f);
+                    }
+                }
+            }
+        }
+
         planets.batch.flush(Gl.triangles);
     }
 
@@ -552,6 +584,37 @@ public class PlanetDialog extends BaseDialog implements PlanetInterfaceRenderer{
                             planets.drawArc(planet, selected.tile.v, sec.tile.v, Pal.place.write(Tmp.c2).a(state.uiAlpha), Pal.accent.write(Tmp.c3).a(state.uiAlpha), 0.4f, 90f, 25);
                         }
                     }
+                }
+            }
+
+            //V2.5: Render cross-sector power grid connection lines in Power View
+            if(powerViewMode && mode == look){
+                SectorPowerGridManager pm = SectorPowerGridManager.get();
+                PlanetPowerTopology topo = pm.getTopology(planet);
+                for(SectorLink link : topo.getAllLinks()){
+                    if(link.a < 0 || link.a >= planet.sectors.size || link.b < 0 || link.b >= planet.sectors.size) continue;
+                    Sector sa = planet.sectors.get(link.a);
+                    Sector sb = planet.sectors.get(link.b);
+                    if(!pm.hasHub(sa) || !pm.hasHub(sb)) continue;
+
+                    GridAggregate agg = topo.computeAggregate(sa.id);
+                    Color cFrom = agg.overloaded
+                        ? Tmp.c2.set(Pal.remove).a(state.uiAlpha)
+                        : Tmp.c2.set(Pal.powerLight).a(state.uiAlpha);
+                    Color cTo = agg.overloaded
+                        ? Tmp.c3.set(Pal.accent).a(state.uiAlpha * 0.85f)
+                        : Tmp.c3.set(Pal.accent).a(state.uiAlpha * 0.95f);
+
+                    planets.drawArcLine(planet, sa.tile.v, sb.tile.v, cFrom, cTo, 0.22f, 65f, 22, 0.008f);
+                }
+
+                // Live hover preview arc when linking from powerLinkSource to an adjacent hub sector
+                if(powerLinkSource != null && hovered != null && hovered != powerLinkSource && powerLinkSource.planet == planet && powerLinkSource.near().contains(hovered) && pm.hasHub(hovered)){
+                    boolean willUnlink = pm.areLinked(powerLinkSource, hovered);
+                    Color previewCol = willUnlink
+                        ? Tmp.c2.set(Pal.remove).a(state.uiAlpha)
+                        : Tmp.c2.set(Pal.heal).a(state.uiAlpha);
+                    planets.drawArcLine(planet, powerLinkSource.tile.v, hovered.tile.v, previewCol, Tmp.c3.set(Pal.powerLight).a(state.uiAlpha), 0.28f, 45f, 20, 0.009f);
                 }
             }
         }
@@ -605,6 +668,26 @@ public class PlanetDialog extends BaseDialog implements PlanetInterfaceRenderer{
                     });
                 }
             }
+
+            //V2.5: Glowing yellow center dot for every sector containing a Surge Sector Power Hub in Power View
+            if(powerViewMode && mode == look && state.uiAlpha > 0.01f && SectorPowerGridManager.get().hasHub(sec)){
+                boolean isSource = sec == powerLinkSource;
+                GridAggregate agg = SectorPowerGridManager.get().getGridAggregate(sec);
+                planets.drawPlane(sec, () -> {
+                    float pulse = Mathf.absin(Time.time, 6f, 1.4f);
+                    Color coreCol = agg.overloaded ? Pal.remove : Pal.powerLight;
+                    Draw.color(Pal.accent, state.uiAlpha * 0.35f);
+                    Fill.circle(0f, 0f, (isSource ? 10.5f : 8.0f) + pulse);
+                    Draw.color(coreCol, state.uiAlpha);
+                    Fill.circle(0f, 0f, isSource ? 6.2f : 4.8f);
+                    if(isSource){
+                        Lines.stroke(1.8f);
+                        Draw.color(Pal.powerLight, state.uiAlpha);
+                        Lines.circle(0f, 0f, 11.5f + pulse * 1.4f);
+                    }
+                    Draw.reset();
+                });
+            }
         }
 
         Draw.reset();
@@ -655,6 +738,52 @@ public class PlanetDialog extends BaseDialog implements PlanetInterfaceRenderer{
                     @Override
                     public void tap(InputEvent event, float x, float y, int count, KeyCode button){
                         if(showing() || button != KeyCode.mouseLeft) return;
+
+                        //V2.5: Power View click-to-link / click-to-unlink interaction on yellow hub dots
+                        if(powerViewMode && mode == look){
+                            SectorPowerGridManager pm = SectorPowerGridManager.get();
+                            if(hovered != null && pm.hasHub(hovered)){
+                                if(powerLinkSource == null){
+                                    powerLinkSource = hovered;
+                                    selected = hovered;
+                                    updateSelected();
+                                    return;
+                                }else if(powerLinkSource == hovered){
+                                    powerLinkSource = null;
+                                    selected = hovered;
+                                    updateSelected();
+                                    return;
+                                }else if(powerLinkSource.planet == hovered.planet && powerLinkSource.near().contains(hovered)){
+                                    int res = pm.requestToggleLink(state.planet, powerLinkSource, hovered);
+                                    if(res == 1){
+                                        ui.showInfoFade("已连接跨区块电网: " + powerLinkSource.name() + " ↔ " + hovered.name());
+                                    }else if(res == -1){
+                                        ui.showInfoFade("已断开跨区块电网连接: " + powerLinkSource.name() + " × " + hovered.name());
+                                    }else if(res == 2){
+                                        ui.showInfoFade("已向房主请求变更跨区块电网连线");
+                                    }
+                                    selected = hovered;
+                                    powerLinkSource = null;
+                                    updateSelected();
+                                    return;
+                                }else{
+                                    // Clicked another non-adjacent hub sector: switch link origin
+                                    powerLinkSource = hovered;
+                                    selected = hovered;
+                                    updateSelected();
+                                    return;
+                                }
+                            }else{
+                                powerLinkSource = null;
+                                if(hovered != null && (canSelect(hovered) || debugSelect)){
+                                    selected = hovered;
+                                }
+                                if(selected != null){
+                                    updateSelected();
+                                }
+                                return;
+                            }
+                        }
 
                         if(hovered != null && selected == hovered && count == 2 && canPlaySector(hovered)){
                             playSelected();
@@ -735,6 +864,16 @@ public class PlanetDialog extends BaseDialog implements PlanetInterfaceRenderer{
                     }
                 }
 
+                if(powerViewMode){
+                    int rev = SectorPowerGridManager.get().getUiRevision();
+                    if(rev != lastPowerGridRevision){
+                        lastPowerGridRevision = rev;
+                        if(selected != null){
+                            updateSelected();
+                        }
+                    }
+                }
+
                 super.act(delta);
             }
 
@@ -750,6 +889,9 @@ public class PlanetDialog extends BaseDialog implements PlanetInterfaceRenderer{
             t.label(() ->
                 mode == select ? "@sectors.select" :
                 mode == planetLaunch ? "@sectors.launchselect" :
+                powerViewMode ? (powerLinkSource != null
+                    ? "电力视野 · 已选起点 [" + powerLinkSource.name() + "] — 点击相邻黄色光点建立/断开连接"
+                    : "电力视野 · 点击区块中心黄色光点，再点击相邻区块光点连接电网") :
                 ""
             ).style(Styles.outlineLabel).color(Pal.accent);
         }),
@@ -763,6 +905,20 @@ public class PlanetDialog extends BaseDialog implements PlanetInterfaceRenderer{
             t.button("@campaign.difficulty", Icon.bookSmall, () -> {
                 Vars.ui.campaignRules.show(state.planet);
             }).margin(12f).size(208f, 40f).padTop(12f).visible(() -> state.planet.allowCampaignRules && mode != planetLaunch && !net.isConnectedClient()).row();
+            t.button("电力视野", Icon.powerSmall, Styles.flatTogglet, () -> {
+                if(!powerViewMode && !isPowerViewUnlocked()){
+                    ui.showInfoFade("需先在科技树解锁「巨浪区块电力枢纽」以开启电力视野");
+                    return;
+                }
+                powerViewMode = !powerViewMode;
+                powerLinkSource = null;
+                if(powerViewMode){
+                    SectorPowerGridManager.get().syncCurrentSectorHubStatus();
+                    lastPowerGridRevision = SectorPowerGridManager.get().getUiRevision();
+                    ui.showInfoFade("已开启电力视野：点击相邻黄色光点连接区块间电网");
+                }
+                updateSelected();
+            }).margin(12f).size(208f, 40f).padTop(6f).checked(b -> powerViewMode).visible(() -> mode == look).row();
             t.add().height(64f); //padding for close button
             Table starsTable = new Table(Styles.black);
             pane.setWidget(starsTable);
@@ -913,6 +1069,7 @@ public class PlanetDialog extends BaseDialog implements PlanetInterfaceRenderer{
     public void viewPlanet(Planet planet, boolean pan){
         if(state.planet != planet){
             selected = null;
+            powerLinkSource = null;
             if(pan){
                 state.otherCamPos = state.planet.position;
                 state.otherCamAlpha = 0;
@@ -1363,6 +1520,11 @@ public class PlanetDialog extends BaseDialog implements PlanetInterfaceRenderer{
             }
         }
 
+        //V2.5: Cross-Sector Power Grid summary card in Power View (or whenever selected sector has a hub)
+        if(mode == look && (powerViewMode || SectorPowerGridManager.get().hasHub(sector))){
+            buildPowerGridSummary(stable, sector);
+        }
+
         if(sector.hasBase()){
             stable.button("@stats", Icon.info, Styles.cleart, () -> showStats(sector)).height(40f).fillX().row();
         }
@@ -1515,6 +1677,73 @@ public class PlanetDialog extends BaseDialog implements PlanetInterfaceRenderer{
         }
 
         if(shouldHide) hide();
+    }
+
+    private boolean isPowerViewUnlocked(){
+        if(debugSelect) return true;
+        if(Blocks.surgeSectorPowerHub != null && Blocks.surgeSectorPowerHub.unlockedNow()) return true;
+        return SectorPowerGridManager.get().getTopology(state.planet).getHubSectorIds().size() > 0;
+    }
+
+    private void buildPowerGridSummary(Table stable, Sector sector){
+        SectorPowerGridManager pm = SectorPowerGridManager.get();
+        boolean hasHub = pm.hasHub(sector);
+
+        stable.table(Styles.black6, card -> {
+            card.left().margin(6f);
+            if(!hasHub){
+                card.add("[lightgray]本区块尚未建造「巨浪区块电力枢纽」").left().row();
+                return;
+            }
+
+            GridAggregate agg = pm.getGridAggregate(sector);
+            long prodSec = Math.round(agg.totalProduced * 60f);
+            long needSec = Math.round(agg.totalNeeded * 60f);
+            long netSec = prodSec - needSec;
+            String netColor = netSec >= 0 ? "[#84f491]+" : "[scarlet]";
+            int satPct = Math.round(agg.satisfaction * 100f);
+
+            card.table(hdr -> {
+                hdr.left();
+                hdr.image(Icon.powerSmall).color(agg.overloaded ? Pal.remove : Pal.powerLight).size(18f).padRight(4f);
+                hdr.add("[#ffd37f]区块间电网 [white](" + agg.sectorCount() + " 区块)" + (agg.overloaded ? " [scarlet][过载]" : "")).left();
+            }).left().growX().padBottom(3f).row();
+
+            card.add("[lightgray]总产出: [white]+" + UI.formatAmount(prodSec) + "/秒  [lightgray]总消耗: [white]-" + UI.formatAmount(needSec) + "/秒").left().row();
+            card.add("[lightgray]净功率: " + netColor + UI.formatAmount(netSec) + "/秒  [lightgray]供电率: [white]" + satPct + "%").left().row();
+            card.add("[lightgray]总储存: [white]" + UI.formatAmount((long)agg.totalBatteryStored) + " / " + UI.formatAmount((long)agg.totalBatteryCapacity)).left().padBottom(4f).row();
+
+            card.add(new Bar(
+                () -> "共享蓄电 " + (agg.totalBatteryCapacity > 0.01f ? Math.round(Mathf.clamp(agg.totalBatteryStored / agg.totalBatteryCapacity) * 100f) + "%" : "0%"),
+                () -> agg.overloaded ? Pal.remove : Pal.powerBar,
+                () -> agg.totalBatteryCapacity > 0.01f ? Mathf.clamp(agg.totalBatteryStored / agg.totalBatteryCapacity) : 0f
+            )).growX().height(18f).padBottom(4f).row();
+
+            if(powerViewMode){
+                boolean isOrigin = powerLinkSource == sector;
+                card.button(isOrigin ? "取消连线起点" : "设为连线起点", Icon.link, Styles.cleart, () -> {
+                    powerLinkSource = isOrigin ? null : sector;
+                    updateSelected();
+                }).growX().height(34f).padBottom(2f).row();
+
+                var linkedIds = pm.getTopology(sector.planet).getLinkedNeighbors(sector.id);
+                if(!linkedIds.isEmpty()){
+                    card.add("[lightgray]已连相邻区块:").left().padTop(2f).row();
+                    for(int nid : linkedIds){
+                        if(nid < 0 || nid >= sector.planet.sectors.size) continue;
+                        Sector neighbor = sector.planet.sectors.get(nid);
+                        card.table(linkRow -> {
+                            linkRow.left();
+                            linkRow.add("[accent]• " + neighbor.name()).left().growX();
+                            linkRow.button("[scarlet]断开", Icon.cancelSmall, Styles.cleart, () -> {
+                                pm.requestToggleLink(sector.planet, sector, neighbor);
+                                updateSelected();
+                            }).height(30f).minWidth(72f);
+                        }).growX().row();
+                    }
+                }
+            }
+        }).growX().padTop(4f).padBottom(4f).row();
     }
 
     public enum Mode{

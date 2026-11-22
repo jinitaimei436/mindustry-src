@@ -16,6 +16,7 @@ import mindustry.game.coop.CampaignChunkTransport.*;
 import mindustry.game.coop.CampaignPermissions.*;
 import mindustry.game.coop.RemoteSectorBridge.*;
 import mindustry.game.coop.SectorOccupancy.*;
+import mindustry.game.power.*;
 import mindustry.gen.*;
 import mindustry.io.*;
 import mindustry.io.SaveIO.*;
@@ -545,6 +546,22 @@ public class MultiSectorCoordinator{
         net.send(new CampaignPacket(CampaignPacket.KIND_CROSS_SECTOR_CHAT, encodeUtf(rawMessage)), true);
     }
 
+    /** V2.5: Client requests the authoritative Host to toggle a cross-sector power link. */
+    public void requestTogglePowerLink(String planetName, int sectorAId, int sectorBId){
+        if(net == null || !net.isConnectedClient() || planetName == null) return;
+        try{
+            ByteArrayOutputStream baos = new ByteArrayOutputStream(48);
+            DataOutputStream out = new DataOutputStream(baos);
+            out.writeUTF(planetName);
+            out.writeInt(sectorAId);
+            out.writeInt(sectorBId);
+            out.flush();
+            net.send(new CampaignPacket(CampaignPacket.KIND_POWER_LINK_REQUEST, baos.toByteArray()), true);
+        }catch(IOException e){
+            Log.err("Failed to send V2.5 power link request", e);
+        }
+    }
+
     public void flushBeforeClientDisconnect(){
         if(net != null && net.isDetachedClient() && state.hasSector()){
             Sector sec = state.getSector();
@@ -604,6 +621,8 @@ public class MultiSectorCoordinator{
             strategyBridge.removeSector(lease.key.planetName, lease.key.sectorId);
         }
         chunkTransport.pruneExpired(now, LEASE_TIMEOUT_MS);
+        // Periodically broadcast V2.5 cross-sector power grid telemetry & topology to all connected clients.
+        broadcastPowerGridSnapshot();
     }
 
     /** Immediately flushes all queued global-logistics deliveries to active detached guests. */
@@ -640,6 +659,12 @@ public class MultiSectorCoordinator{
             });
             byte[] snap = RemoteSectorBridge.serializeLocalStrategySnapshot(sec);
             net.send(new CampaignPacket(CampaignPacket.KIND_STRATEGY_SYNC, snap), true);
+            try{
+                byte[] powerSnap = SectorPowerGridManager.get().serializeLocalSectorTelemetry(sec);
+                net.send(new CampaignPacket(CampaignPacket.KIND_POWER_TELEMETRY, powerSnap), true);
+            }catch(IOException e){
+                Log.err("Failed to serialize V2.5 detached sector power telemetry", e);
+            }
         }
 
         saveSyncTimer += dtSeconds;
@@ -675,6 +700,26 @@ public class MultiSectorCoordinator{
                         }
                         Call.sendMessage(formatted, msg, sender);
                         broadcastChatToDetached(formatted);
+                    }
+                }
+                case CampaignPacket.KIND_POWER_TELEMETRY -> {
+                    PlayerPresence pres = occupancy.getPresence(sender.uuid());
+                    if(pres != null && sender.uuid().equals(occupancy.getLeaseHolder(pres.planetName, pres.sectorId))){
+                        SectorPowerGridManager.get().applyRemoteSectorTelemetry(packet.data, pres.planetName, pres.sectorId);
+                    }
+                }
+                case CampaignPacket.KIND_POWER_LINK_REQUEST -> {
+                    try(DataInputStream in = new DataInputStream(new ByteArrayInputStream(packet.data))){
+                        String planetName = in.readUTF();
+                        int aId = in.readInt();
+                        int bId = in.readInt();
+                        int res = SectorPowerGridManager.get().toggleLinkAuthoritative(planetName, aId, bId);
+                        if(res != 0){
+                            broadcastPowerGridSnapshot();
+                            sendHostControl(con, CTRL_INFO_TOAST, out -> out.writeUTF(res > 0 ? "已连接跨区块电网" : "已断开跨区块电网连接"));
+                        }else{
+                            sendHostControl(con, CTRL_DENIED, out -> out.writeUTF("无法连接：仅相邻且建有巨浪区块电力枢纽的区块可连线"));
+                        }
                     }
                 }
                 default -> {}
@@ -948,6 +993,9 @@ public class MultiSectorCoordinator{
                         Sounds.uiChat.play();
                     }
                 }
+                case CampaignPacket.KIND_POWER_GRID_SYNC -> {
+                    SectorPowerGridManager.get().applyAllTopologies(packet.data);
+                }
                 default -> {}
             }
         }catch(Throwable t){
@@ -1206,8 +1254,25 @@ public class MultiSectorCoordinator{
                     con.send(packet, true);
                 }
             }
+            broadcastPowerGridSnapshot();
         }catch(IOException e){
             Log.err("Failed to broadcast occupancy snapshot", e);
+        }
+    }
+
+    /** V2.5: Broadcasts authoritative planetary cross-sector power grid topology & live aggregates to all guests. */
+    public void broadcastPowerGridSnapshot(){
+        if(net == null || !net.server() || guestConnections.isEmpty()) return;
+        try{
+            byte[] payload = SectorPowerGridManager.get().serializeAllTopologies();
+            CampaignPacket packet = new CampaignPacket(CampaignPacket.KIND_POWER_GRID_SYNC, payload);
+            for(NetConnection con : guestConnections.values()){
+                if(con != null && con.isConnected()){
+                    con.send(packet, true);
+                }
+            }
+        }catch(IOException e){
+            Log.err("Failed to broadcast V2.5 power grid snapshot", e);
         }
     }
 

@@ -206,7 +206,9 @@ public class SerpuloTechTree{
                         node(powerNodeLarge, () -> {
                             node(diode, () -> {
                                 node(surgeTower, () -> {
+                                    node(surgeSectorPowerHub, () -> {
 
+                                    });
                                 });
                             });
                         });

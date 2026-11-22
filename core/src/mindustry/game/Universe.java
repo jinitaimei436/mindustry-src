@@ -9,6 +9,7 @@ import mindustry.game.EventType.*;
 import mindustry.game.Schematic.*;
 import mindustry.game.SectorInfo.*;
 import mindustry.game.coop.*;
+import mindustry.game.power.*;
 import mindustry.game.strategy.*;
 import mindustry.gen.*;
 import mindustry.type.*;
@@ -30,6 +31,7 @@ public class Universe{
 
     public Universe(){
         load();
+        SectorPowerGridManager.get().init();
 
         //update base coverage on capture
         Events.on(SectorCaptureEvent.class, e -> {
@@ -85,14 +87,16 @@ public class Universe{
                 seconds += elapsedSec;
                 secondCounter %= 1f;
 
-                // Real-time 1-second step for global logistics & strategic layer
+                // Real-time 1-second step for global logistics & strategic layer + V2.5 cross-sector power
                 Planet curPlanet = state.getPlanet();
                 for(Planet planet : content.planets()){
-                    if(!planet.campaignRules.globalLogistics) continue;
                     if(curPlanet != null && curPlanet != planet && !curPlanet.updateGroup.contains(planet) && !planet.updateGroup.contains(curPlanet)){
                         continue;
                     }
-                    strategy.update(planet, elapsedSec);
+                    if(planet.campaignRules.globalLogistics){
+                        strategy.update(planet, elapsedSec);
+                    }
+                    SectorPowerGridManager.get().updateGlobalSecond(planet, elapsedSec);
                 }
 
                 //save every few seconds
@@ -314,6 +318,7 @@ public class Universe{
         if(net.isConnectedClient()) return;
         Core.settings.put("utimei", seconds);
         Core.settings.put("turn", turn);
+        SectorPowerGridManager.get().save();
     }
 
     private void load(){

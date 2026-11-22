@@ -3,7 +3,10 @@ package mindustry.world.blocks.power;
 import arc.math.*;
 import arc.struct.*;
 import arc.util.*;
+import mindustry.game.power.*;
+import mindustry.game.power.SectorPowerGridMath.*;
 import mindustry.gen.*;
+import mindustry.world.blocks.power.SurgeSectorPowerHub.*;
 
 public class PowerGraph{
     private static final Queue<Building> queue = new Queue<>();
@@ -23,6 +26,8 @@ public class PowerGraph{
     private float lastScaledPowerIn, lastScaledPowerOut, lastCapacity;
     //diodes workaround for correct energy production info
     private float energyDelta = 0f;
+    //V2.5: Cached reference to active SurgeSectorPowerHub in this local graph (null for isolated local grids)
+    private @Nullable SurgeSectorPowerHubBuild sectorHub;
 
     private final int graphID;
     private static int lastGraphID;
@@ -235,6 +240,34 @@ public class PowerGraph{
         lastCapacity = getTotalBatteryCapacity();
         lastPowerStored = getBatteryStored();
 
+        //V2.5: If this local graph is connected to an active Surge Sector Power Hub, resolve against the inter-sector grid
+        if(sectorHub != null && (!sectorHub.isValid() || sectorHub.power == null || sectorHub.power.graph != this)){
+            sectorHub = findSectorHub();
+        }
+        PowerStepResult crossStep = sectorHub != null
+            ? SectorPowerGridManager.get().resolveLocalGraphTick(sectorHub, powerProduced + Math.max(0f, energyDelta), powerNeeded, lastPowerStored, lastCapacity, Time.delta)
+            : null;
+
+        if(crossStep != null){
+            powerBalance.add(crossStep.gridNetBalancePerTick);
+            energyDelta = 0f;
+            lastPowerNeeded = crossStep.gridTotalNeededTick;
+            lastPowerProduced = crossStep.gridEffectiveAvailable;
+            lastPowerStored = crossStep.gridTotalStored;
+            lastCapacity = crossStep.gridTotalCapacity;
+
+            if(crossStep.localBatteryDelta < -0.00001f){
+                useBatteries(-crossStep.localBatteryDelta);
+            }else if(crossStep.localBatteryDelta > 0.00001f){
+                chargeBatteries(crossStep.localBatteryDelta);
+            }
+
+            if(!(consumers.size == 0 && producers.size == 0 && batteries.size == 0)){
+                distributePower(crossStep.gridTotalNeededTick, crossStep.gridEffectiveAvailable, crossStep.charged);
+            }
+            return;
+        }
+
         powerBalance.add((lastPowerProduced - lastPowerNeeded + energyDelta) / Time.delta);
         energyDelta = 0f;
 
@@ -254,6 +287,17 @@ public class PowerGraph{
 
             distributePower(powerNeeded, powerProduced, charged);
         }
+    }
+
+    private @Nullable SurgeSectorPowerHubBuild findSectorHub(){
+        var items = all.items;
+        for(int i = 0; i < all.size; i++){
+            Building b = items[i];
+            if(b instanceof SurgeSectorPowerHubBuild hub && hub.isValid()){
+                return hub;
+            }
+        }
+        return null;
     }
 
     public void addGraph(PowerGraph graph){
@@ -286,6 +330,9 @@ public class PowerGraph{
             build.power.graph = this;
             build.power.init = true;
             all.add(build);
+            if(build instanceof SurgeSectorPowerHubBuild hub){
+                sectorHub = hub;
+            }
 
             if(build.block.outputsPower && build.block.consumesPower && !build.block.consPower.buffered){
                 producers.add(build);
@@ -309,6 +356,7 @@ public class PowerGraph{
         producers.clear();
         consumers.clear();
         batteries.clear();
+        sectorHub = null;
         //nothing left
         if(entity != null) entity.remove();
     }
