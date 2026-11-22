@@ -1,5 +1,7 @@
 package mindustry.game.strategy.core;
 
+import java.util.*;
+
 /**
  * Directed logistics edge connecting two sectors on a planet.
  * Designed with optional capacity, latency, priority, and energy cost fields
@@ -26,8 +28,11 @@ public class LogisticsRoute{
 
     public boolean enabled = true;
 
-    /** Last solved actual flow rate in items/sec. */
+    /** Last solved total actual flow rate in items/sec across all items on this route. */
     public transient float lastFlowPerSec = 0f;
+
+    /** Last solved per-item actual flow rates in items/sec (supports wildcard "*" routes). */
+    public transient HashMap<String, Float> lastItemFlows = new HashMap<>();
 
     public LogisticsRoute(){
     }

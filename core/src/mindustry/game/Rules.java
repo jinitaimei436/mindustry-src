@@ -249,6 +249,31 @@ public class Rules{
     public Planet planet = Planets.serpulo;
     /** If the `data` instruction is allowed for world processors */
     public boolean allowLogicData = false;
+    /** Whether v1.6 slow combat pace (0.50x DPS / ~2.0x TTK) rules are enabled. */
+    public boolean slowCombatPace = true;
+    /** Internal guard ensuring waveSpacing scaling is applied idempotently across reloads. */
+    public boolean slowCombatPaceApplied = false;
+
+    /** Applies or reverts v1.6 slow combat pace rule multipliers idempotently. */
+    public void applyCombatPace(){
+        if(slowCombatPace){
+            unitDamageMultiplier = CombatPaceBalancer.DAMAGE_RULE_MULT;
+            blockDamageMultiplier = CombatPaceBalancer.DAMAGE_RULE_MULT;
+            unitCrashDamageMultiplier = CombatPaceBalancer.UNIT_CRASH_DAMAGE_MULT;
+            unitBuildSpeedMultiplier = CombatPaceBalancer.UNIT_BUILD_SPEED_MULT;
+            if(!slowCombatPaceApplied){
+                waveSpacing *= CombatPaceBalancer.WAVE_SPACING_MULT;
+                slowCombatPaceApplied = true;
+            }
+        }else if(slowCombatPaceApplied){
+            unitDamageMultiplier = 1f;
+            blockDamageMultiplier = 1f;
+            unitCrashDamageMultiplier = 1f;
+            unitBuildSpeedMultiplier = 1f;
+            waveSpacing /= CombatPaceBalancer.WAVE_SPACING_MULT;
+            slowCombatPaceApplied = false;
+        }
+    }
 
     /** Copies this ruleset exactly. Not efficient at all, do not use often. */
     public Rules copy(){

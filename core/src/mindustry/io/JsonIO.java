@@ -11,12 +11,14 @@ import mindustry.content.*;
 import mindustry.ctype.*;
 import mindustry.game.*;
 import mindustry.game.MapObjectives.*;
+import mindustry.game.strategy.core.*;
 import mindustry.maps.*;
 import mindustry.type.*;
 import mindustry.world.*;
 import mindustry.world.meta.*;
 
 import java.io.*;
+import java.util.*;
 
 @SuppressWarnings("unchecked")
 public class JsonIO{
@@ -334,6 +336,157 @@ public class JsonIO{
                 }
 
                 return exec;
+            }
+        });
+
+        json.setSerializer(ProductionNode.class, new Serializer<>(){
+            @Override
+            public void write(Json json, ProductionNode node, Class knownType){
+                json.writeObjectStart();
+                json.writeValue("blockName", node.blockName);
+                json.writeValue("count", node.count);
+                json.writeValue("powerProducePerSec", node.powerProducePerSec);
+                json.writeValue("powerConsumePerSec", node.powerConsumePerSec);
+                json.writeValue("measuredEfficiency", node.measuredEfficiency);
+                json.writeValue("stopWhenOutputsFull", node.stopWhenOutputsFull);
+
+                json.writeObjectStart("inputsPerSec");
+                for(Map.Entry<String, Float> e : node.inputsPerSec.entrySet()){
+                    json.writeValue(e.getKey(), e.getValue());
+                }
+                json.writeObjectEnd();
+
+                json.writeObjectStart("outputsPerSec");
+                for(Map.Entry<String, Float> e : node.outputsPerSec.entrySet()){
+                    json.writeValue(e.getKey(), e.getValue());
+                }
+                json.writeObjectEnd();
+                json.writeObjectEnd();
+            }
+
+            @Override
+            public ProductionNode read(Json json, JsonValue data, Class type){
+                if(data == null || data.isNull()) return null;
+                ProductionNode node = new ProductionNode(data.getString("blockName", ""));
+                node.count = data.getInt("count", 1);
+                node.powerProducePerSec = data.getFloat("powerProducePerSec", 0f);
+                node.powerConsumePerSec = data.getFloat("powerConsumePerSec", 0f);
+                node.measuredEfficiency = data.getFloat("measuredEfficiency", 1f);
+                node.stopWhenOutputsFull = data.getBoolean("stopWhenOutputsFull", true);
+
+                JsonValue inputs = data.get("inputsPerSec");
+                if(inputs != null){
+                    for(JsonValue v = inputs.child; v != null; v = v.next){
+                        if(v.isNumber()) node.inputsPerSec.put(v.name, v.asFloat());
+                    }
+                }
+                JsonValue outputs = data.get("outputsPerSec");
+                if(outputs != null){
+                    for(JsonValue v = outputs.child; v != null; v = v.next){
+                        if(v.isNumber()) node.outputsPerSec.put(v.name, v.asFloat());
+                    }
+                }
+                return node;
+            }
+        });
+
+        json.setSerializer(SectorStrategyProfile.class, new Serializer<>(){
+            @Override
+            public void write(Json json, SectorStrategyProfile p, Class knownType){
+                json.writeObjectStart();
+                json.writeValue("sectorId", p.sectorId);
+                json.writeValue("hasBase", p.hasBase);
+                json.writeValue("enemyBase", p.enemyBase);
+                json.writeValue("underAttack", p.underAttack);
+                json.writeValue("storageCapacity", p.storageCapacity);
+                json.writeValue("defaultDestinationSectorId", p.defaultDestinationSectorId);
+
+                json.writeObjectStart("storedItems");
+                for(Map.Entry<String, Float> e : p.storedItems.entrySet()){
+                    json.writeValue(e.getKey(), e.getValue());
+                }
+                json.writeObjectEnd();
+
+                json.writeArrayStart("nodes");
+                for(ProductionNode node : p.nodes){
+                    json.writeValue(node, ProductionNode.class);
+                }
+                json.writeArrayEnd();
+
+                json.writeObjectStart("exportCapacities");
+                for(Map.Entry<String, Float> e : p.exportCapacities.entrySet()){
+                    json.writeValue(e.getKey(), e.getValue());
+                }
+                json.writeObjectEnd();
+
+                json.writeObjectStart("importDemands");
+                for(Map.Entry<String, Float> e : p.importDemands.entrySet()){
+                    json.writeValue(e.getKey(), e.getValue());
+                }
+                json.writeObjectEnd();
+
+                json.writeArrayStart("adjacentSectorIds");
+                for(Integer id : p.adjacentSectorIds){
+                    json.writeValue(id);
+                }
+                json.writeArrayEnd();
+
+                json.writeObjectStart("garrisonUnits");
+                for(Map.Entry<String, Integer> e : p.garrisonUnits.entrySet()){
+                    json.writeValue(e.getKey(), e.getValue());
+                }
+                json.writeObjectEnd();
+                json.writeObjectEnd();
+            }
+
+            @Override
+            public SectorStrategyProfile read(Json json, JsonValue data, Class type){
+                if(data == null || data.isNull()) return null;
+                SectorStrategyProfile p = new SectorStrategyProfile(data.getInt("sectorId", -1));
+                p.hasBase = data.getBoolean("hasBase", false);
+                p.enemyBase = data.getBoolean("enemyBase", false);
+                p.underAttack = data.getBoolean("underAttack", false);
+                p.storageCapacity = data.getInt("storageCapacity", 4000);
+                p.defaultDestinationSectorId = data.getInt("defaultDestinationSectorId", -1);
+
+                JsonValue stored = data.get("storedItems");
+                if(stored != null){
+                    for(JsonValue v = stored.child; v != null; v = v.next){
+                        if(v.isNumber()) p.storedItems.put(v.name, v.asFloat());
+                    }
+                }
+                JsonValue nodes = data.get("nodes");
+                if(nodes != null){
+                    for(JsonValue v = nodes.child; v != null; v = v.next){
+                        ProductionNode node = json.readValue(ProductionNode.class, v);
+                        if(node != null) p.nodes.add(node);
+                    }
+                }
+                JsonValue exports = data.get("exportCapacities");
+                if(exports != null){
+                    for(JsonValue v = exports.child; v != null; v = v.next){
+                        if(v.isNumber()) p.exportCapacities.put(v.name, v.asFloat());
+                    }
+                }
+                JsonValue imports = data.get("importDemands");
+                if(imports != null){
+                    for(JsonValue v = imports.child; v != null; v = v.next){
+                        if(v.isNumber()) p.importDemands.put(v.name, v.asFloat());
+                    }
+                }
+                JsonValue adj = data.get("adjacentSectorIds");
+                if(adj != null){
+                    for(JsonValue v = adj.child; v != null; v = v.next){
+                        if(v.isNumber()) p.adjacentSectorIds.add(v.asInt());
+                    }
+                }
+                JsonValue garrison = data.get("garrisonUnits");
+                if(garrison != null){
+                    for(JsonValue v = garrison.child; v != null; v = v.next){
+                        if(v.isNumber()) p.garrisonUnits.put(v.name, v.asInt());
+                    }
+                }
+                return p;
             }
         });
 

@@ -10,7 +10,7 @@ import java.util.*;
  */
 public class PlanetNetworkSolver{
     public int maxGlobalIterations = 12;
-    public int maxLocalIterations = 6;
+    public int maxLocalIterations = 8;
     public float convergenceEpsilon = 1e-4f;
 
     private final LogisticsPolicy policy;
@@ -28,7 +28,7 @@ public class PlanetNetworkSolver{
      * @param stepSeconds        simulation step window (used to bound buffer draw rates)
      */
     public void solve(Map<Integer, SectorStrategyProfile> sectors, List<LogisticsRoute> routes, float stepSeconds){
-        float dt = Math.max(0.1f, stepSeconds);
+        float dt = Math.max(0.05f, stepSeconds);
 
         // Initialize runtime maps
         for(SectorStrategyProfile s : sectors.values()){
@@ -44,6 +44,7 @@ public class PlanetNetworkSolver{
         }
         for(LogisticsRoute r : routes){
             r.lastFlowPerSec = 0f;
+            r.lastItemFlows.clear();
         }
 
         // Group outgoing routes by source sector
@@ -56,9 +57,16 @@ public class PlanetNetworkSolver{
 
         // Track solved incoming instantaneous stream per sector (routes with transitSeconds == 0)
         HashMap<Integer, HashMap<String, Float>> instantImports = new HashMap<>();
+        // Track pure local net rates (local production - local consumption, excluding imports/exports)
+        // so downstream consumptionDeficit does not oscillate with incomingImports across iterations.
+        HashMap<Integer, HashMap<String, Float>> localNetWithoutImports = new HashMap<>();
         for(int id : sectors.keySet()){
             instantImports.put(id, new HashMap<>());
+            localNetWithoutImports.put(id, new HashMap<>());
         }
+
+        // Track previous per-(route, item) flows so wildcard "*" routes converge properly
+        IdentityHashMap<LogisticsRoute, HashMap<String, Float>> prevRouteItemFlows = new IdentityHashMap<>();
 
         for(int gIter = 0; gIter < maxGlobalIterations; gIter++){
             float maxDelta = 0f;
@@ -67,21 +75,29 @@ public class PlanetNetworkSolver{
             for(SectorStrategyProfile sector : sectors.values()){
                 if(!sector.hasBase || (policy.freezeUnderAttack() && sector.underAttack)){
                     clearInactiveSector(sector);
+                    localNetWithoutImports.get(sector.sectorId).clear();
                     continue;
                 }
                 // Foreground sector runs natively at 60 TPS; its exports/imports are bridged externally
                 if(sector.foregroundActive){
+                    localNetWithoutImports.get(sector.sectorId).clear();
                     continue;
                 }
 
                 HashMap<String, Float> incoming = instantImports.get(sector.sectorId);
-                solveLocalSector(sector, incoming, dt);
+                HashMap<String, Float> localOnlyNet = localNetWithoutImports.get(sector.sectorId);
+                solveLocalSector(sector, incoming, localOnlyNet, dt);
             }
 
             // 2. Solve cross-sector route flows based on updated local surplus and downstream demand
             HashMap<Integer, HashMap<String, Float>> nextInstantImports = new HashMap<>();
             for(int id : sectors.keySet()){
                 nextInstantImports.put(id, new HashMap<>());
+            }
+
+            for(LogisticsRoute r : routes){
+                r.lastFlowPerSec = 0f;
+                r.lastItemFlows.clear();
             }
 
             for(SectorStrategyProfile src : sectors.values()){
@@ -93,16 +109,37 @@ public class PlanetNetworkSolver{
                 ArrayList<LogisticsRoute> outRoutes = outgoingBySector.get(src.sectorId);
                 if(outRoutes == null || outRoutes.isEmpty()) continue;
 
-                // Collect all candidate items that can leave src
-                HashSet<String> candidateItems = new HashSet<>();
-                candidateItems.addAll(src.solvedGrossProduction.keySet());
-                candidateItems.addAll(src.storedItems.keySet());
-                for(LogisticsRoute r : outRoutes){
-                    if(!"*".equals(r.itemName)) candidateItems.add(r.itemName);
+                // Collect all candidate items that can leave src in deterministic sorted order
+                HashSet<String> candidateSet = new HashSet<>();
+                if(src.foregroundActive){
+                    // Foreground sector never duplicates from core storage; only route measured physical exports
+                    candidateSet.addAll(src.foregroundExportRates.keySet());
+                }else{
+                    candidateSet.addAll(src.solvedGrossProduction.keySet());
+                    candidateSet.addAll(src.storedItems.keySet());
+                    candidateSet.addAll(instantImports.get(src.sectorId).keySet());
+                    for(LogisticsRoute r : outRoutes){
+                        if(!"*".equals(r.itemName)) candidateSet.add(r.itemName);
+                    }
                 }
+                if(candidateSet.isEmpty()) continue;
+
+                ArrayList<String> candidateItems = new ArrayList<>(candidateSet);
+                Collections.sort(candidateItems);
 
                 float sharedCap = src.exportCapacities.getOrDefault("*", Float.POSITIVE_INFINITY);
-                float sharedUsed = 0f;
+                if(src.foregroundActive){
+                    // Foreground measured exports already reflect real LaunchPad throughput
+                    sharedCap = Float.POSITIVE_INFINITY;
+                }
+
+                // Pass A: compute tentative per-item allocations ignoring shared launch pad contention
+                ArrayList<String> activeItems = new ArrayList<>();
+                ArrayList<ArrayList<LogisticsRoute>> activeMatching = new ArrayList<>();
+                ArrayList<float[]> activeDemands = new ArrayList<>();
+                ArrayList<float[]> tentativeAllocs = new ArrayList<>();
+                float[] tentativeTotals = new float[candidateItems.size()];
+                float grandTentativeTotal = 0f;
 
                 for(String item : candidateItems){
                     ArrayList<LogisticsRoute> matching = new ArrayList<>();
@@ -113,51 +150,144 @@ public class PlanetNetworkSolver{
                     }
                     if(matching.isEmpty()) continue;
 
-                    // Compute exportable rate for this item from src
-                    float netLocal = src.solvedNetRates.getOrDefault(item, 0f);
-                    float bufferRate = src.getStored(item) / dt;
-                    float itemPadCap = src.exportCapacities.getOrDefault(item, Float.POSITIVE_INFINITY);
-                    float remainingShared = Math.max(0f, sharedCap - sharedUsed);
-                    float availableExport = Math.max(0f, Math.min(Math.min(itemPadCap, remainingShared), Math.max(0f, netLocal) + bufferRate));
+                    // Compute exportable rate for this item from src without double-drawing from buffer
+                    float availableExport;
+                    if(src.foregroundActive){
+                        availableExport = Math.max(0f, src.foregroundExportRates.getOrDefault(item, 0f));
+                    }else{
+                        float netWithImports = src.solvedNetRates.getOrDefault(item, 0f);
+                        float bufferRate = src.getStored(item) / dt;
+                        float itemPadCap = src.exportCapacities.getOrDefault(item, Float.POSITIVE_INFINITY);
+                        // netWithImports may be negative when local factories consume from core buffer;
+                        // add first so local consumption and export cannot double-extract the same buffer.
+                        float supplyCap = Math.max(0f, netWithImports + bufferRate);
+                        availableExport = Math.max(0f, Math.min(itemPadCap, supplyCap));
+                    }
 
                     if(availableExport <= 1e-5f) continue;
 
                     // Compute downstream demand for each route
                     float[] demands = new float[matching.size()];
+                    boolean anyDemand = false;
                     for(int i = 0; i < matching.size(); i++){
                         LogisticsRoute r = matching.get(i);
                         SectorStrategyProfile dst = sectors.get(r.toSectorId);
                         float explicitDemand = dst.importDemands.getOrDefault(item, 0f);
-                        float roomRate = Math.max(0f, (dst.storageCapacity - dst.getStored(item)) / dt);
-                        float consumptionDeficit = Math.max(0f, -dst.solvedNetRates.getOrDefault(item, 0f));
-                        float demand = explicitDemand > 0f
-                            ? Math.min(explicitDemand, roomRate + consumptionDeficit)
-                            : Math.min(r.maxItemsPerSec, roomRate + consumptionDeficit);
+                        float demand;
+                        if(dst.foregroundActive && dst.requireExplicitImportDemand){
+                            // Foreground v8 LandingPads deliver onto belts, not directly to core;
+                            // only pull what active LandingPads explicitly request.
+                            demand = Math.min(r.maxItemsPerSec, explicitDemand);
+                        }else if(dst.requireExplicitImportDemand){
+                            float roomRate = Math.max(0f, (dst.storageCapacity - dst.getStored(item)) / dt);
+                            float dstLocalNet = localNetWithoutImports.get(dst.sectorId).getOrDefault(item, 0f);
+                            float consumptionDeficit = Math.max(0f, -dstLocalNet);
+                            demand = Math.min(explicitDemand, roomRate + consumptionDeficit);
+                        }else{
+                            float roomRate = Math.max(0f, (dst.storageCapacity - dst.getStored(item)) / dt);
+                            float dstLocalNet = localNetWithoutImports.get(dst.sectorId).getOrDefault(item, 0f);
+                            float consumptionDeficit = Math.max(0f, -dstLocalNet);
+                            demand = explicitDemand > 0f
+                                ? Math.min(explicitDemand, roomRate + consumptionDeficit)
+                                : Math.min(r.maxItemsPerSec, roomRate + consumptionDeficit);
+                        }
                         demands[i] = Math.max(0f, demand);
+                        if(demands[i] > 1e-5f) anyDemand = true;
                     }
+                    if(!anyDemand) continue;
 
                     float[] alloc = policy.allocateSupply(item, availableExport, matching, demands);
-                    float totalExported = 0f;
-                    for(int i = 0; i < matching.size(); i++){
-                        float flow = alloc[i];
-                        LogisticsRoute r = matching.get(i);
-                        float prev = r.lastFlowPerSec;
-                        r.lastFlowPerSec = flow;
-                        maxDelta = Math.max(maxDelta, Math.abs(flow - prev));
-                        totalExported += flow;
+                    float itemTotal = 0f;
+                    for(float f : alloc) itemTotal += f;
+                    if(itemTotal <= 1e-5f) continue;
 
-                        // Instant routes feed directly into downstream steady-state during the same tick
-                        if(r.transitSeconds <= 1e-4f && flow > 1e-5f){
-                            HashMap<String, Float> dstIn = nextInstantImports.get(r.toSectorId);
-                            dstIn.put(item, dstIn.getOrDefault(item, 0f) + flow);
+                    int idx = activeItems.size();
+                    activeItems.add(item);
+                    activeMatching.add(matching);
+                    activeDemands.add(demands);
+                    tentativeAllocs.add(alloc);
+                    tentativeTotals[idx] = itemTotal;
+                    grandTentativeTotal += itemTotal;
+                }
+
+                // Pass B: fairly scale across items if shared launch pad bandwidth is saturated
+                boolean scaleShared = Float.isFinite(sharedCap) && grandTentativeTotal > sharedCap && grandTentativeTotal > 1e-5f;
+                float sharedScale = scaleShared ? (sharedCap / grandTentativeTotal) : 1f;
+
+                // Track per-route tentative totals so wildcard routes respect r.maxItemsPerSec across all items
+                IdentityHashMap<LogisticsRoute, Float> routeTentativeSums = new IdentityHashMap<>();
+                ArrayList<float[]> postSharedAllocs = new ArrayList<>(activeItems.size());
+
+                for(int idx = 0; idx < activeItems.size(); idx++){
+                    String item = activeItems.get(idx);
+                    ArrayList<LogisticsRoute> matching = activeMatching.get(idx);
+                    float[] alloc;
+                    if(scaleShared){
+                        float itemBudget = tentativeTotals[idx] * sharedScale;
+                        alloc = policy.allocateSupply(item, itemBudget, matching, activeDemands.get(idx));
+                    }else{
+                        alloc = tentativeAllocs.get(idx);
+                    }
+                    postSharedAllocs.add(alloc);
+                    for(int i = 0; i < matching.size(); i++){
+                        LogisticsRoute r = matching.get(i);
+                        if(alloc[i] > 1e-5f){
+                            routeTentativeSums.put(r, routeTentativeSums.getOrDefault(r, 0f) + alloc[i]);
+                        }
+                    }
+                }
+
+                // Commit final flows, enforcing per-route total maxItemsPerSec for wildcard routes
+                for(int idx = 0; idx < activeItems.size(); idx++){
+                    String item = activeItems.get(idx);
+                    ArrayList<LogisticsRoute> matching = activeMatching.get(idx);
+                    float[] alloc = postSharedAllocs.get(idx);
+                    float totalExported = 0f;
+
+                    for(int i = 0; i < matching.size(); i++){
+                        LogisticsRoute r = matching.get(i);
+                        float flow = alloc[i];
+                        if("*".equals(r.itemName)){
+                            float rSum = routeTentativeSums.getOrDefault(r, 0f);
+                            if(rSum > r.maxItemsPerSec && rSum > 1e-5f){
+                                flow *= (r.maxItemsPerSec / rSum);
+                            }
+                        }
+
+                        if(flow > 1e-5f){
+                            r.lastItemFlows.put(item, flow);
+                            r.lastFlowPerSec += flow;
+                            totalExported += flow;
+
+                            // Instant routes feed directly into downstream steady-state during the same tick
+                            if(r.transitSeconds <= 1e-4f){
+                                HashMap<String, Float> dstIn = nextInstantImports.get(r.toSectorId);
+                                dstIn.put(item, dstIn.getOrDefault(item, 0f) + flow);
+                            }
                         }
                     }
 
                     if(totalExported > 1e-5f){
                         src.solvedExportRates.put(item, src.solvedExportRates.getOrDefault(item, 0f) + totalExported);
-                        sharedUsed += totalExported;
                     }
                 }
+            }
+
+            // Compare per-(route, item) flows with previous iteration for accurate convergence
+            for(LogisticsRoute r : routes){
+                HashMap<String, Float> prevMap = prevRouteItemFlows.get(r);
+                for(Map.Entry<String, Float> e : r.lastItemFlows.entrySet()){
+                    float prev = prevMap != null ? prevMap.getOrDefault(e.getKey(), 0f) : 0f;
+                    maxDelta = Math.max(maxDelta, Math.abs(e.getValue() - prev));
+                }
+                if(prevMap != null){
+                    for(Map.Entry<String, Float> e : prevMap.entrySet()){
+                        if(!r.lastItemFlows.containsKey(e.getKey())){
+                            maxDelta = Math.max(maxDelta, Math.abs(e.getValue()));
+                        }
+                    }
+                }
+                prevRouteItemFlows.put(r, new HashMap<>(r.lastItemFlows));
             }
 
             // Update solvedImportRates and check convergence
@@ -186,7 +316,8 @@ public class PlanetNetworkSolver{
         for(SectorStrategyProfile s : sectors.values()){
             if(!s.hasBase || s.foregroundActive || (policy.freezeUnderAttack() && s.underAttack)) continue;
             HashMap<String, Float> incoming = instantImports.get(s.sectorId);
-            solveLocalSector(s, incoming, dt);
+            HashMap<String, Float> localOnlyNet = localNetWithoutImports.get(s.sectorId);
+            solveLocalSector(s, incoming, localOnlyNet, dt);
             for(Map.Entry<String, Float> e : s.solvedExportRates.entrySet()){
                 s.solvedNetRates.put(e.getKey(), s.solvedNetRates.getOrDefault(e.getKey(), 0f) - e.getValue());
             }
@@ -205,27 +336,64 @@ public class PlanetNetworkSolver{
         }
     }
 
-    private void solveLocalSector(SectorStrategyProfile sector, Map<String, Float> incomingImports, float dt){
+    private void solveLocalSector(
+        SectorStrategyProfile sector,
+        Map<String, Float> incomingImports,
+        Map<String, Float> outLocalNetWithoutImports,
+        float dt
+    ){
+        int nodeCount = sector.nodes.size();
+        float[] nodePowerFactor = new float[nodeCount];
+        float[] nodeInputFactor = new float[nodeCount];
+        float[] nodeBackpressureFactor = new float[nodeCount];
+        Arrays.fill(nodePowerFactor, 1f);
+        Arrays.fill(nodeInputFactor, 1f);
+        Arrays.fill(nodeBackpressureFactor, 1f);
+
         HashMap<String, Float> grossProd = new HashMap<>();
+        HashMap<String, Float> potentialProd = new HashMap<>();
         HashMap<String, Float> totalDemand = new HashMap<>();
+        HashMap<String, Float> itemSat = new HashMap<>();
 
         for(int iter = 0; iter < maxLocalIterations; iter++){
             grossProd.clear();
+            potentialProd.clear();
             totalDemand.clear();
             float powerProd = 0f;
             float powerCons = 0f;
 
-            // Gather current gross production, demand, and power using current node efficiencies
-            for(ProductionNode node : sector.nodes){
+            // Gather current gross production, unthrottled potential production, non-self power/item demand
+            for(int i = 0; i < nodeCount; i++){
+                ProductionNode node = sector.nodes.get(i);
                 float eff = node.solvedEfficiency;
+                float preBpEff = Math.max(0f, Math.min(1f, node.measuredEfficiency * nodePowerFactor[i] * nodeInputFactor[i]));
+                // Non-power throttling (missing inputs or full outputs) reduces requested power without
+                // feeding powerSat back into powerCons (which would oscillate under brownout).
+                float nonPowerThrottle = nodeInputFactor[i] * nodeBackpressureFactor[i];
+
                 powerProd += node.powerProducePerSec * eff;
-                powerCons += node.powerConsumePerSec * node.measuredEfficiency;
+                powerCons += node.powerConsumePerSec * node.measuredEfficiency * nonPowerThrottle;
 
                 for(Map.Entry<String, Float> out : node.outputsPerSec.entrySet()){
-                    grossProd.put(out.getKey(), grossProd.getOrDefault(out.getKey(), 0f) + out.getValue() * eff);
+                    String outItem = out.getKey();
+                    grossProd.put(outItem, grossProd.getOrDefault(outItem, 0f) + out.getValue() * eff);
+                    potentialProd.put(outItem, potentialProd.getOrDefault(outItem, 0f) + out.getValue() * preBpEff);
                 }
+
+                // Demand for each input item is throttled by power, backpressure, and OTHER inputs
+                // (never by this item's own itemSat, preventing fixed-point oscillation).
                 for(Map.Entry<String, Float> in : node.inputsPerSec.entrySet()){
-                    totalDemand.put(in.getKey(), totalDemand.getOrDefault(in.getKey(), 0f) + in.getValue() * node.measuredEfficiency);
+                    String inItem = in.getKey();
+                    float otherInputSat = 1f;
+                    if(iter > 0 && node.inputsPerSec.size() > 1){
+                        for(String other : node.inputsPerSec.keySet()){
+                            if(!other.equals(inItem)){
+                                otherInputSat = Math.min(otherInputSat, itemSat.getOrDefault(other, 1f));
+                            }
+                        }
+                    }
+                    float demScale = node.measuredEfficiency * nodePowerFactor[i] * nodeBackpressureFactor[i] * otherInputSat;
+                    totalDemand.put(inItem, totalDemand.getOrDefault(inItem, 0f) + in.getValue() * demScale);
                 }
             }
 
@@ -233,7 +401,7 @@ public class PlanetNetworkSolver{
             sector.solvedPowerSatisfaction = powerSat;
 
             // Compute item satisfaction ratios (supply includes local prod + imports + buffer)
-            HashMap<String, Float> itemSat = new HashMap<>();
+            itemSat.clear();
             String worstMissingItem = null;
             float worstSat = 1f;
 
@@ -255,25 +423,25 @@ public class PlanetNetworkSolver{
                 }
             }
 
-            // Update each node's solvedEfficiency
+            // Update each node's component factors and solvedEfficiency
             float maxNodeDelta = 0f;
-            for(ProductionNode node : sector.nodes){
-                float factor = node.measuredEfficiency;
+            for(int i = 0; i < nodeCount; i++){
+                ProductionNode node = sector.nodes.get(i);
+                float pFactor = node.powerConsumePerSec > 1e-5f ? powerSat : 1f;
 
-                // Power constraint
-                if(node.powerConsumePerSec > 1e-5f){
-                    factor *= powerSat;
-                }
-
-                // Input item constraint (limiting reagent)
+                // Limiting reagent: minimum satisfaction across all required input items
+                float inFactor = 1f;
                 for(String inItem : node.inputsPerSec.keySet()){
-                    factor *= itemSat.getOrDefault(inItem, 1f);
+                    inFactor = Math.min(inFactor, itemSat.getOrDefault(inItem, 1f));
                 }
 
-                // Storage backpressure: if all outputs are full and have no downstream demand/export, throttle
+                // Storage backpressure: if all outputs are full, throttle proportionally to downstream
+                // consumption + export against total unthrottled potential production.
+                float bpFactor = 1f;
                 if(policy.enableStorageBackpressure() && node.stopWhenOutputsFull && !node.outputsPerSec.isEmpty()){
                     boolean allBlocked = true;
                     float maxNeededRatio = 0f;
+                    float preBpEff = node.measuredEfficiency * pFactor * inFactor;
                     for(Map.Entry<String, Float> out : node.outputsPerSec.entrySet()){
                         String outItem = out.getKey();
                         if(!sector.isItemFull(outItem)){
@@ -282,16 +450,21 @@ public class PlanetNetworkSolver{
                         }
                         float outFlow = totalDemand.getOrDefault(outItem, 0f)
                             + sector.solvedExportRates.getOrDefault(outItem, 0f);
-                        if(outFlow > 1e-5f && out.getValue() > 1e-5f){
-                            maxNeededRatio = Math.max(maxNeededRatio, Math.min(1f, outFlow / Math.max(out.getValue(), grossProd.getOrDefault(outItem, out.getValue()))));
+                        float pot = Math.max(out.getValue() * preBpEff, potentialProd.getOrDefault(outItem, 0f));
+                        if(outFlow > 1e-5f && pot > 1e-5f){
+                            maxNeededRatio = Math.max(maxNeededRatio, Math.min(1f, outFlow / pot));
                         }
                     }
                     if(allBlocked){
-                        factor *= maxNeededRatio;
+                        bpFactor = maxNeededRatio;
                     }
                 }
 
-                float clamped = Math.max(0f, Math.min(1f, factor));
+                nodePowerFactor[i] = pFactor;
+                nodeInputFactor[i] = inFactor;
+                nodeBackpressureFactor[i] = bpFactor;
+
+                float clamped = Math.max(0f, Math.min(1f, node.measuredEfficiency * pFactor * inFactor * bpFactor));
                 maxNodeDelta = Math.max(maxNodeDelta, Math.abs(clamped - node.solvedEfficiency));
                 node.solvedEfficiency = clamped;
             }
@@ -309,9 +482,10 @@ public class PlanetNetworkSolver{
             }
         }
 
-        // Compute final gross production and net rates (before exports)
+        // Compute final gross production and net rates (both with and without incoming imports)
         sector.solvedGrossProduction.clear();
         sector.solvedNetRates.clear();
+        outLocalNetWithoutImports.clear();
 
         for(Map.Entry<String, Float> in : incomingImports.entrySet()){
             sector.solvedNetRates.put(in.getKey(), sector.solvedNetRates.getOrDefault(in.getKey(), 0f) + in.getValue());
@@ -323,10 +497,12 @@ public class PlanetNetworkSolver{
                 float rate = out.getValue() * eff;
                 sector.solvedGrossProduction.put(out.getKey(), sector.solvedGrossProduction.getOrDefault(out.getKey(), 0f) + rate);
                 sector.solvedNetRates.put(out.getKey(), sector.solvedNetRates.getOrDefault(out.getKey(), 0f) + rate);
+                outLocalNetWithoutImports.put(out.getKey(), outLocalNetWithoutImports.getOrDefault(out.getKey(), 0f) + rate);
             }
             for(Map.Entry<String, Float> in : node.inputsPerSec.entrySet()){
                 float rate = in.getValue() * eff;
                 sector.solvedNetRates.put(in.getKey(), sector.solvedNetRates.getOrDefault(in.getKey(), 0f) - rate);
+                outLocalNetWithoutImports.put(in.getKey(), outLocalNetWithoutImports.getOrDefault(in.getKey(), 0f) - rate);
             }
         }
     }

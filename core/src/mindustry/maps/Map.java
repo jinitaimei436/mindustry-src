@@ -90,7 +90,11 @@ public class Map implements Comparable<Map>, Publishable{
         mode.apply(out);
 
         //now apply map-specific overrides
-        return rules(out);
+        Rules result = rules(out);
+        if(mode != Gamemode.editor && !result.editor){
+            result.applyCombatPace();
+        }
+        return result;
     }
 
     /** This creates a new instance of Rules.*/

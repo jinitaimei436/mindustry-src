@@ -15,6 +15,7 @@ public class CampaignRules{
     public boolean clearSectorOnLose;
     public boolean pauseDisabled;
     public boolean globalLogistics = true;
+    public boolean slowCombatPace = true;
 
     public void apply(Planet planet, Rules rules){
         rules.staticFog = rules.fog = fog;
@@ -22,6 +23,8 @@ public class CampaignRules{
         rules.randomWaveAI = randomWaveAI;
         rules.pauseDisabled = pauseDisabled;
         rules.objectiveTimerMultiplier = difficulty.waveTimeMultiplier;
+        rules.slowCombatPace = slowCombatPace;
+        rules.applyCombatPace();
         if(planet.showRtsAIRule){
             boolean enabled = rtsAI && rules.attackMode; //if attackMode becomes false (waves enabled), turn off RTS AI
             boolean swapped = rules.teams.get(rules.waveTeam).rtsAi != enabled;

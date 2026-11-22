@@ -24,6 +24,8 @@ public class Version{
     public static int revision = 0;
     /** Whether the Steam version of the game is requested. This is different from Vars.steam (Steam initialization can fail) */
     public static boolean isSteam = false;
+    /** Custom fork release version tag. */
+    public static final String forkVersion = "v1.6";
     /** Whether version loading is enabled. */
     public static boolean enabled = true;
 

@@ -53,14 +53,18 @@ public class SectorProfileCompiler{
                 float powerUsePerSec = block.consPower != null && !block.consPower.buffered
                     ? block.consPower.usage * 60f
                     : 0f;
-                float eff = Math.max(0.05f, Math.min(1f, build.efficiency));
+                float eff = Math.max(0f, Math.min(1f, build.efficiency));
+                float timeScale = Math.max(0.01f, build.timeScale());
 
                 if(build instanceof Drill.DrillBuild drillBuild && block instanceof Drill drill){
                     Item item = drillBuild.dominantItem;
                     if(item != null && drillBuild.dominantItems > 0){
-                        float rate = (60f / Math.max(1f, drill.getDrillTime(item))) * drillBuild.dominantItems;
+                        // Account for liquid boost (warmup * speed => liquidMult^2) and overdrive timeScale
+                        float liquidMult = 1f + (drill.liquidBoostIntensity - 1f) * Math.max(0f, Math.min(1f, drillBuild.optionalEfficiency));
+                        float boostFactor = liquidMult * liquidMult;
+                        float rate = (60f / Math.max(1f, drill.getDrillTime(item))) * drillBuild.dominantItems * boostFactor * timeScale;
                         String key = "drill:" + block.name + ":" + item.name;
-                        ProductionNode node = mergedNodes.computeIfAbsent(key, k -> new ProductionNode(block.name));
+                        ProductionNode node = getOrCreateNode(mergedNodes, key, block.name);
                         node.count++;
                         node.addOutput(item.name, rate);
                         node.powerConsumePerSec += powerUsePerSec;
@@ -68,9 +72,9 @@ public class SectorProfileCompiler{
                         compiledRawOutputs.put(item.name, compiledRawOutputs.getOrDefault(item.name, 0f) + rate * eff);
                     }
                 }else if(build instanceof GenericCrafter.GenericCrafterBuild && block instanceof GenericCrafter crafter){
-                    float cyclesPerSec = 60f / Math.max(1f, crafter.craftTime);
+                    float cyclesPerSec = (60f / Math.max(1f, crafter.craftTime)) * timeScale;
                     String key = "crafter:" + block.name;
-                    ProductionNode node = mergedNodes.computeIfAbsent(key, k -> new ProductionNode(block.name));
+                    ProductionNode node = getOrCreateNode(mergedNodes, key, block.name);
                     node.count++;
                     node.powerConsumePerSec += powerUsePerSec;
                     node.measuredEfficiency = blendEfficiency(node.measuredEfficiency, eff, node.count);
@@ -89,26 +93,51 @@ public class SectorProfileCompiler{
 
                     addItemConsumers(node, block, cyclesPerSec);
                 }else if(build instanceof PowerGenerator.GeneratorBuild genBuild && block instanceof PowerGenerator gen){
-                    float powerOutPerSec = gen.powerProduction * 60f;
-                    float genEff = Math.max(0.05f, Math.min(1f, genBuild.productionEfficiency > 0f ? genBuild.productionEfficiency : eff));
-                    float durationTicks = block instanceof ConsumeGenerator cg ? Math.max(1f, cg.itemDuration) : 60f;
-                    float cyclesPerSec = 60f / durationTicks;
+                    float powerOutPerSec = gen.powerProduction * 60f * timeScale;
+                    float genEff = Math.max(0f, Math.min(1f, genBuild.productionEfficiency > 0f ? genBuild.productionEfficiency : eff));
 
-                    String key = "gen:" + block.name;
-                    ProductionNode node = mergedNodes.computeIfAbsent(key, k -> new ProductionNode(block.name));
+                    Item filterFuel = null;
+                    float durationTicks = 60f;
+                    if(block instanceof ConsumeGenerator cg){
+                        if(cg.filterItem != null){
+                            filterFuel = resolveFilterFuel(cg.filterItem, genBuild, info, genEff > 0f);
+                        }
+                        float durMult = filterFuel != null ? cg.itemDurationMultipliers.get(filterFuel, 1f) : 1f;
+                        durationTicks = Math.max(1f, cg.itemDuration * durMult);
+                    }else if(block instanceof NuclearReactor nr){
+                        durationTicks = Math.max(1f, nr.itemDuration);
+                    }else if(block instanceof ImpactReactor ir){
+                        durationTicks = Math.max(1f, ir.itemDuration);
+                    }
+                    float cyclesPerSec = (60f / durationTicks) * timeScale;
+
+                    String key = "gen:" + block.name + (filterFuel != null ? ":" + filterFuel.name : "");
+                    ProductionNode node = getOrCreateNode(mergedNodes, key, block.name);
                     node.count++;
                     node.powerProducePerSec += powerOutPerSec;
                     node.powerConsumePerSec += powerUsePerSec;
                     node.stopWhenOutputsFull = false;
                     node.measuredEfficiency = blendEfficiency(node.measuredEfficiency, genEff, node.count);
 
+                    if(filterFuel != null){
+                        node.addInput(filterFuel.name, cyclesPerSec);
+                    }
                     addItemConsumers(node, block, cyclesPerSec);
                 }else if(build instanceof LaunchPad.LaunchPadBuild && block instanceof LaunchPad pad){
-                    float cap = (60f / Math.max(1f, pad.launchTime)) * pad.itemCapacity * eff;
+                    float cap = (60f / Math.max(1f, pad.launchTime)) * pad.itemCapacity * eff * timeScale;
                     totalLaunchCapPerSec += cap;
+                    if(powerUsePerSec > 0f){
+                        String key = "launchpad:" + block.name;
+                        ProductionNode node = getOrCreateNode(mergedNodes, key, block.name);
+                        node.count++;
+                        node.powerConsumePerSec += powerUsePerSec;
+                        node.stopWhenOutputsFull = false;
+                        node.measuredEfficiency = blendEfficiency(node.measuredEfficiency, eff, node.count);
+                    }
                 }else if(build instanceof LandingPad.LandingPadBuild landingBuild && block instanceof LandingPad pad){
                     if(landingBuild.config != null){
-                        float demand = (60f / Math.max(1f, pad.cooldownTime)) * pad.itemCapacity;
+                        float cycleTicks = Math.max(1f, pad.cooldownTime + pad.arrivalDuration);
+                        float demand = (60f / cycleTicks) * pad.itemCapacity;
                         profile.importDemands.put(
                             landingBuild.config.name,
                             profile.importDemands.getOrDefault(landingBuild.config.name, 0f) + demand
@@ -120,18 +149,20 @@ public class SectorProfileCompiler{
 
         profile.nodes.addAll(mergedNodes.values());
 
-        if(totalLaunchCapPerSec > 0f){
-            profile.exportCapacities.put("*", totalLaunchCapPerSec);
-        }
+        // Always record explicit shared launch pad cap (including 0f when no LaunchPads exist)
+        profile.exportCapacities.put("*", totalLaunchCapPerSec);
 
-        // Fallback node for unmodeled sources (unit miners, custom mod blocks, logic-fed items)
+        // Fallback node for unmodeled sources (unit miners, custom mod blocks, logic-fed items).
+        // Subtract info.imports because vanilla LandingPad calls produced() and includes imports in rawProduction.
         ProductionNode fallback = new ProductionNode("fallback-raw");
         boolean hasFallback = false;
         for(Item item : content.items()){
             SectorInfo.ExportStat stat = info.rawProduction.get(item);
             if(stat == null || stat.mean <= 0.01f) continue;
+            SectorInfo.ExportStat impStat = info.imports.get(item);
+            float importedMean = impStat != null ? Math.max(0f, impStat.mean) : 0f;
             float modeled = compiledRawOutputs.getOrDefault(item.name, 0f);
-            float residual = stat.mean - modeled;
+            float residual = stat.mean - importedMean - modeled;
             if(residual > 0.05f){
                 fallback.addOutput(item.name, residual);
                 hasFallback = true;
@@ -144,6 +175,34 @@ public class SectorProfileCompiler{
 
         info.strategyProfile = profile;
         return profile;
+    }
+
+    private static ProductionNode getOrCreateNode(HashMap<String, ProductionNode> map, String key, String blockName){
+        return map.computeIfAbsent(key, k -> {
+            ProductionNode n = new ProductionNode(blockName);
+            n.count = 0;
+            return n;
+        });
+    }
+
+    private static Item resolveFilterFuel(ConsumeItemFilter filter, Building build, SectorInfo info, boolean currentlyRunning){
+        Item consumed = filter.getConsumed(build);
+        if(consumed != null) return consumed;
+        if(!currentlyRunning) return null;
+
+        // Generator is mid-burn with empty local buffer; pick a matching item present in the sector
+        Item fallback = null;
+        for(Item candidate : content.items()){
+            if(filter.filter.get(candidate)){
+                if(info.items.get(candidate) > 0){
+                    return candidate;
+                }
+                if(fallback == null){
+                    fallback = candidate;
+                }
+            }
+        }
+        return fallback;
     }
 
     private static void addItemConsumers(ProductionNode node, Block block, float cyclesPerSec){

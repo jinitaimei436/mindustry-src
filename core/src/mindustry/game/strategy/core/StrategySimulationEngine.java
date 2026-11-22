@@ -40,6 +40,11 @@ public class StrategySimulationEngine{
         sectors.put(profile.sectorId, profile);
     }
 
+    public void removeSector(int sectorId){
+        sectors.remove(sectorId);
+        routes.removeIf(r -> r.fromSectorId == sectorId || r.toSectorId == sectorId);
+    }
+
     public void addRoute(LogisticsRoute route){
         routes.add(route);
     }
@@ -63,32 +68,51 @@ public class StrategySimulationEngine{
         float remaining = dtSeconds;
         int safetyGuard = 0;
 
-        while(remaining > 1e-4f && safetyGuard++ < 32){
+        while(remaining > 1e-4f && safetyGuard++ < 64){
             // 1. Solve instantaneous rates
             solver.solve(sectors, routes, remaining);
 
             // 2. Find earliest inflection event within remaining window
             float subStep = Math.min(remaining, findNextInflectionTime(remaining));
-            if(subStep < 0.05f){
-                subStep = Math.min(remaining, 0.05f);
+            if(subStep < 1e-3f){
+                subStep = Math.min(remaining, 1e-3f);
             }
 
             // 3. Emit delayed shipments at the start of subStep for routes with transitSeconds > 0
+            // Uses per-item solved flows so both specific-item and wildcard "*" routes work accurately.
             for(LogisticsRoute r : routes){
-                if(!r.enabled || r.transitSeconds <= 1e-4f || r.lastFlowPerSec <= 1e-5f) continue;
-                if(!"*".equals(r.itemName)){
-                    inTransitShipments.add(new LogisticsRoute.InTransitShipment(
-                        r.fromSectorId, r.toSectorId, r.itemName, r.lastFlowPerSec * subStep, r.transitSeconds
-                    ));
+                if(!r.enabled || r.transitSeconds <= 1e-4f || r.lastItemFlows.isEmpty()) continue;
+                for(Map.Entry<String, Float> e : r.lastItemFlows.entrySet()){
+                    float flow = e.getValue();
+                    if(flow > 1e-5f){
+                        inTransitShipments.add(new LogisticsRoute.InTransitShipment(
+                            r.fromSectorId, r.toSectorId, e.getKey(), flow * subStep, r.transitSeconds
+                        ));
+                    }
                 }
             }
 
             // 4. Advance all in-transit shipments by subStep
             advanceShipments(subStep);
 
-            // 5. Apply solved net rates to background sectors' storage buffers
+            // 5. Apply solved net rates to background sectors' storage buffers, and accumulate
+            // direct deliveries for foreground sectors when legacy core delivery is active.
             for(SectorStrategyProfile s : sectors.values()){
-                if(!s.hasBase || s.foregroundActive || (policy.freezeUnderAttack() && s.underAttack)) continue;
+                if(!s.hasBase || (policy.freezeUnderAttack() && s.underAttack)) continue;
+                if(s.foregroundActive){
+                    if(!s.requireExplicitImportDemand){
+                        for(Map.Entry<String, Float> e : s.solvedImportRates.entrySet()){
+                            float delta = e.getValue() * subStep;
+                            if(delta > 1e-6f){
+                                s.foregroundPendingDelivery.put(
+                                    e.getKey(),
+                                    s.foregroundPendingDelivery.getOrDefault(e.getKey(), 0f) + delta
+                                );
+                            }
+                        }
+                    }
+                    continue;
+                }
                 for(Map.Entry<String, Float> e : s.solvedNetRates.entrySet()){
                     float delta = e.getValue() * subStep;
                     if(Math.abs(delta) > 1e-6f){
@@ -157,8 +181,15 @@ public class StrategySimulationEngine{
             ship.remainingSeconds -= dt;
             if(ship.remainingSeconds <= 1e-4f){
                 SectorStrategyProfile dst = sectors.get(ship.toSectorId);
-                if(dst != null && dst.hasBase && !dst.foregroundActive){
-                    dst.addStored(ship.itemName, ship.amount);
+                if(dst != null && dst.hasBase){
+                    if(!dst.foregroundActive){
+                        dst.addStored(ship.itemName, ship.amount);
+                    }else if(!dst.requireExplicitImportDemand){
+                        dst.foregroundPendingDelivery.put(
+                            ship.itemName,
+                            dst.foregroundPendingDelivery.getOrDefault(ship.itemName, 0f) + ship.amount
+                        );
+                    }
                 }
                 it.remove();
             }

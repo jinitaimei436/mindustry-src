@@ -15,6 +15,19 @@ public class SectorStrategyProfile{
     /** True when the player is currently playing this sector in the foreground. */
     public transient boolean foregroundActive = false;
 
+    /**
+     * When true (e.g. foreground sector in v8 LandingPad mode), only explicit importDemands
+     * pull items from upstream and deliveries are handled externally by LandingPads rather than
+     * injected directly into core storage.
+     */
+    public transient boolean requireExplicitImportDemand = false;
+
+    /** Live measured export rates from an active foreground sector's physical LaunchPads (items/sec). */
+    public transient HashMap<String, Float> foregroundExportRates = new HashMap<>();
+
+    /** Fractional accumulator for items delivered from background sectors into a foreground core. */
+    public transient HashMap<String, Float> foregroundPendingDelivery = new HashMap<>();
+
     /** Core item storage capacity for each item type. */
     public int storageCapacity = 4000;
 
