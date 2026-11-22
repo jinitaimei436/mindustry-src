@@ -374,7 +374,7 @@ public class SectorConveyorPort extends Block{
                 }
             }else{
                 if(localSandboxFifo.size() < itemCapacity){
-                    localSandboxFifo.addLast(item.id);
+                    localSandboxFifo.addLast((int)item.id);
                     if(items != null) items.add(item, 1);
                 }
             }
@@ -551,7 +551,7 @@ public class SectorConveyorPort extends Block{
                 localSandboxFifo.clear();
                 items.each((item, amount) -> {
                     for(int i = 0; i < amount && localSandboxFifo.size() < itemCapacity; i++){
-                        localSandboxFifo.addLast(item.id);
+                        localSandboxFifo.addLast((int)item.id);
                     }
                 });
             }
