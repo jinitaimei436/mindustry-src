@@ -15,8 +15,46 @@ public class PlanetNetworkSolver{
 
     private final LogisticsPolicy policy;
 
+    // V3.2: Reusable scratch buffers to drastically cut minor GC pressure on 272-sector planets (single-threaded solver)
+    private final HashMap<Integer, ArrayList<LogisticsRoute>> scratchOutgoingBySector = new HashMap<>();
+    private final HashMap<Integer, HashMap<String, Float>> scratchInstantImports = new HashMap<>();
+    private final HashMap<Integer, HashMap<String, Float>> scratchNextInstantImports = new HashMap<>();
+    private final HashMap<Integer, HashMap<String, Float>> scratchLocalNetWithoutImports = new HashMap<>();
+    private final IdentityHashMap<LogisticsRoute, HashMap<String, Float>> scratchPrevRouteItemFlows = new IdentityHashMap<>();
+    private final HashSet<String> scratchCandidateSet = new HashSet<>();
+    private final ArrayList<String> scratchCandidateItems = new ArrayList<>();
+    private final IdentityHashMap<LogisticsRoute, Float> scratchRouteTentativeSums = new IdentityHashMap<>();
+
+    private final HashMap<String, Float> scratchGrossProd = new HashMap<>();
+    private final HashMap<String, Float> scratchPotentialProd = new HashMap<>();
+    private final HashMap<String, Float> scratchTotalDemand = new HashMap<>();
+    private final HashMap<String, Float> scratchItemSat = new HashMap<>();
+    private float[] scratchNodePowerFactor = new float[16];
+    private float[] scratchNodeInputFactor = new float[16];
+    private float[] scratchNodeBackpressureFactor = new float[16];
+
     public PlanetNetworkSolver(LogisticsPolicy policy){
         this.policy = policy;
+    }
+
+    private void ensureLocalNodeScratchCapacity(int nodeCount){
+        if(scratchNodePowerFactor.length < nodeCount){
+            int cap = Math.max(nodeCount, scratchNodePowerFactor.length * 2);
+            scratchNodePowerFactor = new float[cap];
+            scratchNodeInputFactor = new float[cap];
+            scratchNodeBackpressureFactor = new float[cap];
+        }
+    }
+
+    private static HashMap<String, Float> getOrClearFloatMap(HashMap<Integer, HashMap<String, Float>> table, int key){
+        HashMap<String, Float> map = table.get(key);
+        if(map == null){
+            map = new HashMap<>();
+            table.put(key, map);
+        }else{
+            map.clear();
+        }
+        return map;
     }
 
     /**
@@ -49,26 +87,29 @@ public class PlanetNetworkSolver{
             r.lastItemFlows.clear();
         }
 
-        // Group outgoing routes by source sector
-        HashMap<Integer, ArrayList<LogisticsRoute>> outgoingBySector = new HashMap<>();
+        // Group outgoing routes by source sector (reusing bucket lists)
+        for(ArrayList<LogisticsRoute> list : scratchOutgoingBySector.values()){
+            list.clear();
+        }
         for(LogisticsRoute r : routes){
             if(r.enabled && sectors.containsKey(r.fromSectorId) && sectors.containsKey(r.toSectorId)){
-                outgoingBySector.computeIfAbsent(r.fromSectorId, k -> new ArrayList<>()).add(r);
+                scratchOutgoingBySector.computeIfAbsent(r.fromSectorId, k -> new ArrayList<>()).add(r);
             }
         }
 
-        // Track solved incoming instantaneous stream per sector (routes with transitSeconds == 0)
-        HashMap<Integer, HashMap<String, Float>> instantImports = new HashMap<>();
-        // Track pure local net rates (local production - local consumption, excluding imports/exports)
-        // so downstream consumptionDeficit does not oscillate with incomingImports across iterations.
-        HashMap<Integer, HashMap<String, Float>> localNetWithoutImports = new HashMap<>();
+        // Reuse per-sector maps across ticks; swap instantImports <-> nextInstantImports each iteration
+        HashMap<Integer, HashMap<String, Float>> instantImports = scratchInstantImports;
+        HashMap<Integer, HashMap<String, Float>> nextInstantImports = scratchNextInstantImports;
+        HashMap<Integer, HashMap<String, Float>> localNetWithoutImports = scratchLocalNetWithoutImports;
         for(int id : sectors.keySet()){
-            instantImports.put(id, new HashMap<>());
-            localNetWithoutImports.put(id, new HashMap<>());
+            getOrClearFloatMap(instantImports, id);
+            getOrClearFloatMap(nextInstantImports, id);
+            getOrClearFloatMap(localNetWithoutImports, id);
         }
 
         // Track previous per-(route, item) flows so wildcard "*" routes converge properly
-        IdentityHashMap<LogisticsRoute, HashMap<String, Float>> prevRouteItemFlows = new IdentityHashMap<>();
+        scratchPrevRouteItemFlows.clear();
+        boolean converged = false;
 
         for(int gIter = 0; gIter < maxGlobalIterations; gIter++){
             float maxDelta = 0f;
@@ -92,9 +133,8 @@ public class PlanetNetworkSolver{
             }
 
             // 2. Solve cross-sector route flows based on updated local surplus and downstream demand
-            HashMap<Integer, HashMap<String, Float>> nextInstantImports = new HashMap<>();
             for(int id : sectors.keySet()){
-                nextInstantImports.put(id, new HashMap<>());
+                nextInstantImports.get(id).clear();
             }
 
             for(LogisticsRoute r : routes){
@@ -108,26 +148,28 @@ public class PlanetNetworkSolver{
                     continue;
                 }
 
-                ArrayList<LogisticsRoute> outRoutes = outgoingBySector.get(src.sectorId);
+                ArrayList<LogisticsRoute> outRoutes = scratchOutgoingBySector.get(src.sectorId);
                 if(outRoutes == null || outRoutes.isEmpty()) continue;
 
                 // Collect all candidate items that can leave src in deterministic sorted order
-                HashSet<String> candidateSet = new HashSet<>();
+                scratchCandidateSet.clear();
                 if(src.foregroundActive){
                     // Foreground sector never duplicates from core storage; only route measured physical exports
-                    candidateSet.addAll(src.foregroundExportRates.keySet());
+                    scratchCandidateSet.addAll(src.foregroundExportRates.keySet());
                 }else{
-                    candidateSet.addAll(src.solvedGrossProduction.keySet());
-                    candidateSet.addAll(src.storedItems.keySet());
-                    candidateSet.addAll(instantImports.get(src.sectorId).keySet());
+                    scratchCandidateSet.addAll(src.solvedGrossProduction.keySet());
+                    scratchCandidateSet.addAll(src.storedItems.keySet());
+                    scratchCandidateSet.addAll(instantImports.get(src.sectorId).keySet());
                     for(LogisticsRoute r : outRoutes){
-                        if(!"*".equals(r.itemName)) candidateSet.add(r.itemName);
+                        if(!"*".equals(r.itemName)) scratchCandidateSet.add(r.itemName);
                     }
                 }
-                if(candidateSet.isEmpty()) continue;
+                if(scratchCandidateSet.isEmpty()) continue;
 
-                ArrayList<String> candidateItems = new ArrayList<>(candidateSet);
-                Collections.sort(candidateItems);
+                scratchCandidateItems.clear();
+                scratchCandidateItems.addAll(scratchCandidateSet);
+                Collections.sort(scratchCandidateItems);
+                ArrayList<String> candidateItems = scratchCandidateItems;
 
                 float sharedCap = src.exportCapacities.getOrDefault("*", Float.POSITIVE_INFINITY);
                 if(src.foregroundActive){
@@ -217,7 +259,8 @@ public class PlanetNetworkSolver{
                 float sharedScale = scaleShared ? (sharedCap / grandTentativeTotal) : 1f;
 
                 // Track per-route tentative totals so wildcard routes respect r.maxItemsPerSec across all items
-                IdentityHashMap<LogisticsRoute, Float> routeTentativeSums = new IdentityHashMap<>();
+                scratchRouteTentativeSums.clear();
+                IdentityHashMap<LogisticsRoute, Float> routeTentativeSums = scratchRouteTentativeSums;
                 ArrayList<float[]> postSharedAllocs = new ArrayList<>(activeItems.size());
 
                 for(int idx = 0; idx < activeItems.size(); idx++){
@@ -277,7 +320,7 @@ public class PlanetNetworkSolver{
 
             // Compare per-(route, item) flows with previous iteration for accurate convergence
             for(LogisticsRoute r : routes){
-                HashMap<String, Float> prevMap = prevRouteItemFlows.get(r);
+                HashMap<String, Float> prevMap = scratchPrevRouteItemFlows.get(r);
                 for(Map.Entry<String, Float> e : r.lastItemFlows.entrySet()){
                     float prev = prevMap != null ? prevMap.getOrDefault(e.getKey(), 0f) : 0f;
                     maxDelta = Math.max(maxDelta, Math.abs(e.getValue() - prev));
@@ -288,8 +331,11 @@ public class PlanetNetworkSolver{
                             maxDelta = Math.max(maxDelta, Math.abs(e.getValue()));
                         }
                     }
+                    prevMap.clear();
+                    prevMap.putAll(r.lastItemFlows);
+                }else{
+                    scratchPrevRouteItemFlows.put(r, new HashMap<>(r.lastItemFlows));
                 }
-                prevRouteItemFlows.put(r, new HashMap<>(r.lastItemFlows));
             }
 
             // Update solvedImportRates and check convergence
@@ -304,22 +350,33 @@ public class PlanetNetworkSolver{
                         maxDelta = Math.max(maxDelta, Math.abs(e.getValue()));
                     }
                 }
-                instantImports.put(s.sectorId, nextIn);
                 s.solvedImportRates.clear();
-                s.solvedImportRates.putAll(nextIn);
+                if(!nextIn.isEmpty()){
+                    s.solvedImportRates.putAll(nextIn);
+                }
             }
 
+            // Swap double-buffered import maps with zero allocation
+            HashMap<Integer, HashMap<String, Float>> swap = instantImports;
+            instantImports = nextInstantImports;
+            nextInstantImports = swap;
+
             if(maxDelta < convergenceEpsilon){
+                converged = true;
                 break;
             }
         }
 
-        // Finalize net rates after exports and instant imports
+        // Finalize net rates after exports and instant imports.
+        // When the global fixed-point loop converged, each sector's solvedNetRates/solvedGrossProduction
+        // were already computed against the exact converged incoming imports & export rates.
         for(SectorStrategyProfile s : sectors.values()){
             if(!s.hasBase || s.foregroundActive || (policy.freezeUnderAttack() && s.underAttack)) continue;
-            HashMap<String, Float> incoming = instantImports.get(s.sectorId);
-            HashMap<String, Float> localOnlyNet = localNetWithoutImports.get(s.sectorId);
-            solveLocalSector(s, incoming, localOnlyNet, dt);
+            if(!converged){
+                HashMap<String, Float> incoming = instantImports.get(s.sectorId);
+                HashMap<String, Float> localOnlyNet = localNetWithoutImports.get(s.sectorId);
+                solveLocalSector(s, incoming, localOnlyNet, dt);
+            }
             for(Map.Entry<String, Float> e : s.solvedExportRates.entrySet()){
                 s.solvedNetRates.put(e.getKey(), s.solvedNetRates.getOrDefault(e.getKey(), 0f) - e.getValue());
             }
@@ -347,17 +404,22 @@ public class PlanetNetworkSolver{
         float dt
     ){
         int nodeCount = sector.nodes.size();
-        float[] nodePowerFactor = new float[nodeCount];
-        float[] nodeInputFactor = new float[nodeCount];
-        float[] nodeBackpressureFactor = new float[nodeCount];
-        Arrays.fill(nodePowerFactor, 1f);
-        Arrays.fill(nodeInputFactor, 1f);
-        Arrays.fill(nodeBackpressureFactor, 1f);
+        ensureLocalNodeScratchCapacity(nodeCount);
+        float[] nodePowerFactor = scratchNodePowerFactor;
+        float[] nodeInputFactor = scratchNodeInputFactor;
+        float[] nodeBackpressureFactor = scratchNodeBackpressureFactor;
+        Arrays.fill(nodePowerFactor, 0, nodeCount, 1f);
+        Arrays.fill(nodeInputFactor, 0, nodeCount, 1f);
+        Arrays.fill(nodeBackpressureFactor, 0, nodeCount, 1f);
 
-        HashMap<String, Float> grossProd = new HashMap<>();
-        HashMap<String, Float> potentialProd = new HashMap<>();
-        HashMap<String, Float> totalDemand = new HashMap<>();
-        HashMap<String, Float> itemSat = new HashMap<>();
+        HashMap<String, Float> grossProd = scratchGrossProd;
+        HashMap<String, Float> potentialProd = scratchPotentialProd;
+        HashMap<String, Float> totalDemand = scratchTotalDemand;
+        HashMap<String, Float> itemSat = scratchItemSat;
+        grossProd.clear();
+        potentialProd.clear();
+        totalDemand.clear();
+        itemSat.clear();
 
         for(int iter = 0; iter < maxLocalIterations; iter++){
             grossProd.clear();

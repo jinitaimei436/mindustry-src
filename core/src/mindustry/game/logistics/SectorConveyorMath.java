@@ -329,9 +329,19 @@ public final class SectorConveyorMath{
 
         /** Advances the 1-second throughput measurement window cleanly. */
         public void advanceRateWindow(float dtSeconds){
-            if(dtSeconds <= 0f) return;
+            advanceRateWindowTracked(dtSeconds);
+        }
+
+        /**
+         * Variant of {@link #advanceRateWindow} returning true if displayed throughput changed
+         * (either items moved during this window or a previously non-zero rate dropped to zero).
+         */
+        public boolean advanceRateWindowTracked(float dtSeconds){
+            if(dtSeconds <= 0f) return false;
             windowElapsedSec += dtSeconds;
             if(windowElapsedSec >= 1.0f){
+                boolean hadPriorRate = recentTotalRate > 0.001f || !itemRatesPerSec.isEmpty();
+                boolean hasNewCounts = !windowCounts.isEmpty();
                 float inv = 1f / windowElapsedSec;
                 itemRatesPerSec.clear();
                 float total = 0f;
@@ -345,7 +355,9 @@ public final class SectorConveyorMath{
                 recentTotalRate = total;
                 windowCounts.clear();
                 windowElapsedSec = 0f;
+                return hadPriorRate || hasNewCounts;
             }
+            return false;
         }
 
         /** Copies persisted item counts/rates from another snapshot (for V2 network sync). */
@@ -369,29 +381,43 @@ public final class SectorConveyorMath{
      */
     public static class PlanetConveyorTopology{
         private final java.util.Map<Long, SectorPortRecord> ports = new HashMap<>();
+        /** V3.2: Per-sector sorted bucket index (senders asc, then receivers asc) for O(1) lookup. */
+        private final java.util.Map<Integer, ArrayList<SectorPortRecord>> portsBySector = new HashMap<>();
         private final java.util.Map<Long, SectorConveyorLink> linksBySender = new HashMap<>();
         private final java.util.Map<Long, SectorConveyorLink> linksByReceiver = new HashMap<>();
 
+        private static int comparePorts(SectorPortRecord a, SectorPortRecord b){
+            if(a.isSender != b.isSender) return a.isSender ? -1 : 1;
+            return Integer.compare(a.portNumber, b.portNumber);
+        }
+
         public void clear(){
             ports.clear();
+            portsBySector.clear();
             linksBySender.clear();
             linksByReceiver.clear();
         }
 
         public int countSendersInSector(int sectorId){
+            ArrayList<SectorPortRecord> bucket = portsBySector.get(sectorId);
+            if(bucket == null || bucket.isEmpty()) return 0;
             int count = 0;
-            for(SectorPortRecord p : ports.values()){
-                if(p.sectorId == sectorId && p.isSender){
+            for(int i = 0; i < bucket.size(); i++){
+                if(bucket.get(i).isSender){
                     count++;
+                }else{
+                    break; // Senders are always ordered before receivers in each bucket
                 }
             }
             return count;
         }
 
         public int countReceiversInSector(int sectorId){
+            ArrayList<SectorPortRecord> bucket = portsBySector.get(sectorId);
+            if(bucket == null || bucket.isEmpty()) return 0;
             int count = 0;
-            for(SectorPortRecord p : ports.values()){
-                if(p.sectorId == sectorId && !p.isSender){
+            for(int i = 0; i < bucket.size(); i++){
+                if(!bucket.get(i).isSender){
                     count++;
                 }
             }
@@ -399,18 +425,12 @@ public final class SectorConveyorMath{
         }
 
         public boolean hasAnyPort(int sectorId){
-            for(SectorPortRecord p : ports.values()){
-                if(p.sectorId == sectorId) return true;
-            }
-            return false;
+            ArrayList<SectorPortRecord> bucket = portsBySector.get(sectorId);
+            return bucket != null && !bucket.isEmpty();
         }
 
         public Set<Integer> getPortSectorIds(){
-            Set<Integer> ids = new LinkedHashSet<>();
-            for(SectorPortRecord p : ports.values()){
-                ids.add(p.sectorId);
-            }
-            return ids;
+            return new LinkedHashSet<>(portsBySector.keySet());
         }
 
         /**
@@ -436,28 +456,32 @@ public final class SectorConveyorMath{
         }
 
         public List<SectorPortRecord> getSectorPorts(int sectorId, boolean isSender){
-            List<SectorPortRecord> out = new ArrayList<>();
-            for(SectorPortRecord p : ports.values()){
-                if(p.sectorId == sectorId && p.isSender == isSender){
+            ArrayList<SectorPortRecord> bucket = portsBySector.get(sectorId);
+            if(bucket == null || bucket.isEmpty()) return new ArrayList<>();
+            List<SectorPortRecord> out = new ArrayList<>(bucket.size());
+            for(int i = 0; i < bucket.size(); i++){
+                SectorPortRecord p = bucket.get(i);
+                if(p.isSender == isSender){
                     out.add(p);
                 }
             }
-            out.sort((a, b) -> Integer.compare(a.portNumber, b.portNumber));
             return out;
         }
 
         public List<SectorPortRecord> getAllSectorPorts(int sectorId){
-            List<SectorPortRecord> out = new ArrayList<>();
-            for(SectorPortRecord p : ports.values()){
-                if(p.sectorId == sectorId){
-                    out.add(p);
-                }
-            }
-            out.sort((a, b) -> {
-                if(a.isSender != b.isSender) return a.isSender ? -1 : 1;
-                return Integer.compare(a.portNumber, b.portNumber);
-            });
-            return out;
+            ArrayList<SectorPortRecord> bucket = portsBySector.get(sectorId);
+            if(bucket == null || bucket.isEmpty()) return new ArrayList<>();
+            return new ArrayList<>(bucket);
+        }
+
+        /**
+         * Zero-allocation read-only view of a sector's sorted ports (senders first, then receivers).
+         * Ideal for hot paths such as 1-second background settlement and PlanetDialog rendering.
+         */
+        public List<SectorPortRecord> getAllSectorPortsReadOnly(int sectorId){
+            ArrayList<SectorPortRecord> bucket = portsBySector.get(sectorId);
+            if(bucket == null || bucket.isEmpty()) return Collections.emptyList();
+            return Collections.unmodifiableList(bucket);
         }
 
         /**
@@ -478,6 +502,9 @@ public final class SectorConveyorMath{
             }
             SectorPortRecord rec = new SectorPortRecord(sectorId, portNumber, isSender, tier);
             ports.put(key, rec);
+            ArrayList<SectorPortRecord> bucket = portsBySector.computeIfAbsent(sectorId, k -> new ArrayList<>());
+            bucket.add(rec);
+            bucket.sort((a, b) -> comparePorts(a, b));
             return rec;
         }
 
@@ -485,6 +512,15 @@ public final class SectorConveyorMath{
         public boolean unregisterPort(int sectorId, int portNumber, boolean isSender){
             long key = packPortKey(sectorId, isSender, portNumber);
             SectorPortRecord removed = ports.remove(key);
+            if(removed != null){
+                ArrayList<SectorPortRecord> bucket = portsBySector.get(sectorId);
+                if(bucket != null){
+                    bucket.remove(removed);
+                    if(bucket.isEmpty()){
+                        portsBySector.remove(sectorId);
+                    }
+                }
+            }
             boolean linkRemoved = isSender
                 ? unbindSender(sectorId, portNumber)
                 : unbindReceiver(sectorId, portNumber);
@@ -685,7 +721,21 @@ public final class SectorConveyorMath{
             Set<Integer> frozenSectorIds,
             float dtSeconds
         ){
-            if(dtSeconds <= 0f || ports.isEmpty()) return;
+            stepBackgroundLinksTracked(activelySimulatedSectorIds, sectorPowerEfficiency, frozenSectorIds, dtSeconds);
+        }
+
+        /**
+         * Variant of {@link #stepBackgroundLinks} returning true if any background item moved or any
+         * displayed port throughput rate changed (allows callers to throttle UI refreshes & disk saves).
+         */
+        public boolean stepBackgroundLinksTracked(
+            Set<Integer> activelySimulatedSectorIds,
+            java.util.Map<Integer, Float> sectorPowerEfficiency,
+            Set<Integer> frozenSectorIds,
+            float dtSeconds
+        ){
+            if(dtSeconds <= 0f || ports.isEmpty()) return false;
+            boolean anyChanged = false;
 
             for(SectorConveyorLink link : linksBySender.values()){
                 boolean senderSimulated = activelySimulatedSectorIds != null && activelySimulatedSectorIds.contains(link.senderSectorId);
@@ -693,6 +743,8 @@ public final class SectorConveyorMath{
                     boolean senderFrozen = frozenSectorIds != null && frozenSectorIds.contains(link.senderSectorId);
                     boolean receiverFrozen = frozenSectorIds != null && frozenSectorIds.contains(link.receiverSectorId);
                     SectorPortRecord sender = ports.get(link.senderKey());
+                    float prevRate = sender != null ? sender.recentTotalRate : 0f;
+                    boolean prevPaused = sender != null && sender.backpressurePaused;
                     float eff = 1f;
                     if(senderFrozen || receiverFrozen){
                         eff = 0f;
@@ -702,7 +754,12 @@ public final class SectorConveyorMath{
                             eff = Math.max(0f, Math.min(1f, p));
                         }
                     }
-                    stepSenderTransfer(link.senderSectorId, link.senderPortNumber, dtSeconds, eff);
+                    int moved = stepSenderTransfer(link.senderSectorId, link.senderPortNumber, dtSeconds, eff);
+                    if(moved > 0){
+                        anyChanged = true;
+                    }else if(sender != null && (sender.backpressurePaused != prevPaused || Math.abs(sender.recentTotalRate - prevRate) > 0.001f)){
+                        anyChanged = true;
+                    }
                 }
             }
 
@@ -710,12 +767,17 @@ public final class SectorConveyorMath{
                 boolean simulated = activelySimulatedSectorIds != null && activelySimulatedSectorIds.contains(p.sectorId);
                 if(!simulated){
                     if(!p.isSender){
-                        p.advanceRateWindow(dtSeconds);
+                        if(p.advanceRateWindowTracked(dtSeconds)){
+                            anyChanged = true;
+                        }
                     }else if(!linksBySender.containsKey(packPortKey(p.sectorId, true, p.portNumber))){
-                        p.advanceRateWindow(dtSeconds);
+                        if(p.advanceRateWindowTracked(dtSeconds)){
+                            anyChanged = true;
+                        }
                     }
                 }
             }
+            return anyChanged;
         }
 
         // ==================== BINARY SERIALIZATION ====================

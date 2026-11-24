@@ -85,6 +85,8 @@ public class PlanetDialog extends BaseDialog implements PlanetInterfaceRenderer{
     /** V2.8: Global Resource View overlay state ("资源视野"), strictly mutually exclusive with powerViewMode. */
     public boolean resourceViewMode = false;
     private int lastConveyorRevision = -1;
+    /** V3.2: Reusable planet-local camera direction vector for zero-allocation hemisphere backface culling. */
+    private final Vec3 tmpCamDir = new Vec3();
 
     public PlanetDialog(){
         super("", Styles.fullDialog);
@@ -597,14 +599,19 @@ public class PlanetDialog extends BaseDialog implements PlanetInterfaceRenderer{
                 }
             }
 
-            //V2.5: Render cross-sector power grid connection lines in Power View
+            //V2.5: Render cross-sector power grid connection lines in Power View (with hemisphere backface culling)
             if(powerViewMode && mode == look){
                 SectorPowerGridManager pm = SectorPowerGridManager.get();
                 PlanetPowerTopology topo = pm.getTopology(planet);
-                for(SectorLink link : topo.getAllLinks()){
+                computeLocalCameraDir(planet, tmpCamDir);
+                java.util.Collection<SectorLink> powerLinks = topo.getAllLinks();
+                int arcPoints = (powerLinks.size() > 120 || state.zoom > 1.6f) ? 14 : 22;
+
+                for(SectorLink link : powerLinks){
                     if(link.a < 0 || link.a >= planet.sectors.size || link.b < 0 || link.b >= planet.sectors.size) continue;
                     Sector sa = planet.sectors.get(link.a);
                     Sector sb = planet.sectors.get(link.b);
+                    if(sa.tile.v.dot(tmpCamDir) < -0.30f && sb.tile.v.dot(tmpCamDir) < -0.30f) continue;
                     if(!pm.hasHub(sa) || !pm.hasHub(sb)) continue;
 
                     GridAggregate agg = topo.computeAggregate(sa.id);
@@ -615,7 +622,7 @@ public class PlanetDialog extends BaseDialog implements PlanetInterfaceRenderer{
                         ? Tmp.c3.set(Pal.accent).a(state.uiAlpha * 0.85f)
                         : Tmp.c3.set(Pal.accent).a(state.uiAlpha * 0.95f);
 
-                    planets.drawArcLine(planet, sa.tile.v, sb.tile.v, cFrom, cTo, 0.22f, 65f, 22, 0.008f);
+                    planets.drawArcLine(planet, sa.tile.v, sb.tile.v, cFrom, cTo, 0.22f, 65f, arcPoints, 0.008f);
                 }
 
                 // Live hover preview arc when linking from powerLinkSource to an adjacent hub sector
@@ -632,13 +639,18 @@ public class PlanetDialog extends BaseDialog implements PlanetInterfaceRenderer{
             if(resourceViewMode && mode == look){
                 SectorConveyorManager cm = SectorConveyorManager.get();
                 PlanetConveyorTopology ctopo = cm.getTopology(planet);
-                for(SectorConveyorLink link : ctopo.getAllLinks()){
+                computeLocalCameraDir(planet, tmpCamDir);
+                java.util.Collection<SectorConveyorLink> conveyorLinks = ctopo.getAllLinks();
+                int arcPoints = (conveyorLinks.size() > 120 || state.zoom > 1.6f) ? 14 : 24;
+
+                for(SectorConveyorLink link : conveyorLinks){
                     if(link.senderSectorId < 0 || link.senderSectorId >= planet.sectors.size
                         || link.receiverSectorId < 0 || link.receiverSectorId >= planet.sectors.size){
                         continue;
                     }
                     Sector sa = planet.sectors.get(link.senderSectorId);
                     Sector sb = planet.sectors.get(link.receiverSectorId);
+                    if(sa.tile.v.dot(tmpCamDir) < -0.30f && sb.tile.v.dot(tmpCamDir) < -0.30f) continue;
                     if(!sa.hasBase() || !sb.hasBase()) continue;
 
                     SectorPortRecord sp = ctopo.getPort(link.senderSectorId, true, link.senderPortNumber);
@@ -650,15 +662,25 @@ public class PlanetDialog extends BaseDialog implements PlanetInterfaceRenderer{
                     Color cTo = paused
                         ? Tmp.c3.set(Pal.accent).a(state.uiAlpha * 0.8f)
                         : Tmp.c3.set(Pal.lancerLaser).a(state.uiAlpha);
-                    planets.drawArc(planet, sa.tile.v, sb.tile.v, cFrom, cTo, 0.30f, 72f, 24);
+                    planets.drawArc(planet, sa.tile.v, sb.tile.v, cFrom, cTo, 0.30f, 72f, arcPoints);
                 }
             }
         }
     }
 
+    /** Transforms the camera-to-planet unit vector into planet-local coordinates for O(1) dot-product culling. */
+    private void computeLocalCameraDir(Planet planet, Vec3 out){
+        out.set(planets.cam.position).sub(planet.position).nor().rotate(Vec3.Y, planet.getRotation());
+    }
+
     @Override
     public void renderProjections(Planet planet){
         float iw = 64f/4f;
+        boolean drawPowerDots = powerViewMode && mode == look && state.uiAlpha > 0.01f;
+        boolean drawResourceDots = resourceViewMode && mode == look && state.uiAlpha > 0.01f;
+        if(drawPowerDots || drawResourceDots){
+            computeLocalCameraDir(planet, tmpCamDir);
+        }
 
         for(Sector sec : planet.sectors){
             if(sec != hovered){
@@ -705,8 +727,8 @@ public class PlanetDialog extends BaseDialog implements PlanetInterfaceRenderer{
                 }
             }
 
-            //V2.5: Glowing yellow center dot for every sector containing a Surge Sector Power Hub in Power View
-            if(powerViewMode && mode == look && state.uiAlpha > 0.01f && SectorPowerGridManager.get().hasHub(sec)){
+            //V2.5: Glowing yellow center dot for every visible sector containing a Surge Sector Power Hub
+            if(drawPowerDots && (sec == powerLinkSource || sec.tile.v.dot(tmpCamDir) >= -0.25f) && SectorPowerGridManager.get().hasHub(sec)){
                 boolean isSource = sec == powerLinkSource;
                 GridAggregate agg = SectorPowerGridManager.get().getGridAggregate(sec);
                 planets.drawPlane(sec, () -> {
@@ -725,8 +747,8 @@ public class PlanetDialog extends BaseDialog implements PlanetInterfaceRenderer{
                 });
             }
 
-            //V2.8: Glowing cyan node dot for sectors with cross-sector conveyor ports in Resource View
-            if(resourceViewMode && mode == look && state.uiAlpha > 0.01f && SectorConveyorManager.get().hasAnyPort(sec)){
+            //V2.8: Glowing cyan node dot for visible sectors with cross-sector conveyor ports
+            if(drawResourceDots && (sec == selected || sec.tile.v.dot(tmpCamDir) >= -0.25f) && SectorConveyorManager.get().hasAnyPort(sec)){
                 boolean isSel = sec == selected;
                 planets.drawPlane(sec, () -> {
                     float pulse = Mathf.absin(Time.time, 6f, 1.3f);
@@ -1819,7 +1841,7 @@ public class PlanetDialog extends BaseDialog implements PlanetInterfaceRenderer{
     private void buildResourceConveyorSummary(Table container, Sector sector){
         SectorConveyorManager cm = SectorConveyorManager.get();
         PlanetConveyorTopology topo = cm.getTopology(sector.planet);
-        java.util.List<SectorPortRecord> ports = topo.getAllSectorPorts(sector.id);
+        java.util.List<SectorPortRecord> ports = topo.getAllSectorPortsReadOnly(sector.id);
         if(ports.isEmpty()) return;
 
         boolean hasReceiver = false;
@@ -1894,7 +1916,7 @@ public class PlanetDialog extends BaseDialog implements PlanetInterfaceRenderer{
     private void buildResourceConveyorDetailSection(Table container, Sector sector, Runnable refreshAction){
         SectorConveyorManager cm = SectorConveyorManager.get();
         PlanetConveyorTopology topo = cm.getTopology(sector.planet);
-        java.util.List<SectorPortRecord> ports = topo.getAllSectorPorts(sector.id);
+        java.util.List<SectorPortRecord> ports = topo.getAllSectorPortsReadOnly(sector.id);
         if(ports.isEmpty()) return;
 
         container.add("[#a9d8ff]区块间传送带").left().padTop(8f).padBottom(4f).row();

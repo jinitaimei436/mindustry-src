@@ -3,6 +3,7 @@ package mindustry.game.strategy;
 import mindustry.core.*;
 import mindustry.game.logistics.SectorConveyorMath;
 import mindustry.game.logistics.SectorConveyorMath.*;
+import mindustry.game.power.SectorPowerGridMath.*;
 import mindustry.game.strategy.core.*;
 import org.junit.jupiter.api.*;
 
@@ -18,8 +19,8 @@ import static org.junit.jupiter.api.Assertions.*;
 public class RealTimeSettlementTests{
 
     @Test
-    void versionForkTagIsV31(){
-        assertEquals("v3.1", Version.forkVersion);
+    void versionForkTagIsV32(){
+        assertEquals("v3.2", Version.forkVersion);
     }
 
     @Test
@@ -153,5 +154,96 @@ public class RealTimeSettlementTests{
         engine.step(3f);
 
         assertEquals(6.0f, consumer.getStored("silicon"), 0.1f);
+    }
+
+    @Test
+    void powerGridCacheInvalidatesAccuratelyAcross272Sectors(){
+        PlanetPowerTopology topo = new PlanetPowerTopology();
+        for(int i = 0; i < 272; i++){
+            topo.updateSectorTelemetry(i, 10f, 5f, 100f, 200f, 1000L);
+            if(i > 0){
+                assertTrue(topo.addLink(i - 1, i, true));
+            }
+        }
+
+        GridAggregate fullA = topo.computeAggregate(0);
+        GridAggregate fullB = topo.computeAggregate(271);
+        assertSame(fullA, fullB); // Cached component shares the same GridAggregate instance
+        assertEquals(272, fullA.sectorCount());
+        assertEquals(2720f, fullA.totalProduced, 1e-3f);
+
+        // Sever link in the middle -> cache must invalidate and split cleanly into two 136-sector components
+        assertTrue(topo.removeLink(135, 136));
+        GridAggregate left = topo.computeAggregate(0);
+        GridAggregate right = topo.computeAggregate(271);
+        assertNotSame(left, right);
+        assertEquals(136, left.sectorCount());
+        assertEquals(136, right.sectorCount());
+
+        // Telemetry update must invalidate aggregate cache without losing topology
+        topo.updateSectorTelemetry(0, 0f, 5000f, 0f, 200f, 2000L);
+        GridAggregate leftOverloaded = topo.computeAggregate(10);
+        assertTrue(leftOverloaded.overloaded);
+        assertTrue(leftOverloaded.satisfaction < 0.5f);
+    }
+
+    @Test
+    void conveyorSectorBucketIndexAndTrackedSteppingStayConsistentAt272Sectors(){
+        PlanetConveyorTopology topo = new PlanetConveyorTopology();
+        for(int i = 0; i < 272; i++){
+            assertNotNull(topo.registerPort(i, 2, false, SectorConveyorMath.TIER_JUNIOR));
+            assertNotNull(topo.registerPort(i, 1, true, SectorConveyorMath.TIER_SENIOR));
+            assertNotNull(topo.registerPort(i, 1, false, SectorConveyorMath.TIER_SENIOR));
+        }
+
+        assertTrue(topo.hasAnyPort(100));
+        assertFalse(topo.hasAnyPort(999));
+        assertEquals(1, topo.countSendersInSector(100));
+        assertEquals(2, topo.countReceiversInSector(100));
+
+        // Read-only bucket order: senders asc, then receivers asc
+        List<SectorPortRecord> bucket = topo.getAllSectorPortsReadOnly(100);
+        assertEquals(3, bucket.size());
+        assertTrue(bucket.get(0).isSender && bucket.get(0).portNumber == 1);
+        assertTrue(!bucket.get(1).isSender && bucket.get(1).portNumber == 1);
+        assertTrue(!bucket.get(2).isSender && bucket.get(2).portNumber == 2);
+
+        // Idle network reports no activity so UI revision and disk save stay quiet
+        assertFalse(topo.stepBackgroundLinksTracked(Collections.emptySet(), null, null, 1f));
+
+        // Active link reports activity when items transfer
+        assertTrue(topo.bind(0, 1, 1, 1, true));
+        topo.getPort(0, true, 1).enqueue(0);
+        topo.getPort(0, true, 1).enqueue(0);
+        assertTrue(topo.stepBackgroundLinksTracked(Collections.emptySet(), null, null, 1f));
+        assertEquals(2, topo.getPort(1, false, 1).bufferedCount());
+
+        // Unregistering all ports cleans up bucket
+        assertTrue(topo.clearSector(100));
+        assertFalse(topo.hasAnyPort(100));
+        assertTrue(topo.getAllSectorPortsReadOnly(100).isEmpty());
+    }
+
+    @Test
+    void strategyEngineHandles272SectorsWithScratchReuseAndBoundaryRefresh(){
+        StrategySimulationEngine engine = new StrategySimulationEngine();
+        for(int i = 0; i < 272; i++){
+            SectorStrategyProfile p = new SectorStrategyProfile(i);
+            p.hasBase = true;
+            p.storageCapacity = 1000;
+            // Stagger near-full capacities to stress boundary transitions without substep avalanche
+            p.setStored("copper", i < 20 ? 999.0f : 500.0f);
+            p.nodes.add(new ProductionNode("mechanical-drill").addOutput("copper", 2.0f));
+            engine.putSector(p);
+        }
+
+        engine.step(1f);
+        assertEquals(1.0, engine.getElapsedSeconds(), 1e-4);
+        // Near-full sector reaches exact capacity and refreshes backpressure rate to 0
+        assertEquals(1000f, engine.sectors.get(0).getStored("copper"), 1e-3f);
+        assertEquals(0f, engine.sectors.get(0).solvedGrossProduction.getOrDefault("copper", 0f), 1e-3f);
+        // Mid-full sector advances cleanly by 2.0/s
+        assertEquals(502f, engine.sectors.get(100).getStored("copper"), 0.05f);
+        assertEquals(2.0f, engine.sectors.get(100).solvedGrossProduction.getOrDefault("copper", 0f), 0.05f);
     }
 }

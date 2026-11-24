@@ -190,10 +190,30 @@ public final class SectorPowerGridMath{
         private final java.util.Map<Integer, Set<Integer>> adjacency = new HashMap<>();
         private final java.util.Map<Long, SectorLink> edges = new HashMap<>();
 
+        // V3.2: Versioned connected-component & aggregate caches to eliminate repeated O(V) BFS per frame/sector
+        private int topologyVersion = 1;
+        private int telemetryVersion = 1;
+        private int cachedComponentVersion = 0;
+        private final java.util.Map<Integer, int[]> componentCache = new HashMap<>();
+        private int cachedAggregateVersion = 0;
+        private final java.util.Map<Integer, GridAggregate> aggregateCache = new HashMap<>();
+
+        private void invalidateTopology(){
+            topologyVersion++;
+            telemetryVersion++;
+        }
+
+        private void invalidateTelemetry(){
+            telemetryVersion++;
+        }
+
         public void clear(){
             nodes.clear();
             adjacency.clear();
             edges.clear();
+            componentCache.clear();
+            aggregateCache.clear();
+            invalidateTopology();
         }
 
         public SectorPowerNode getOrCreateNode(int sectorId){
@@ -226,13 +246,22 @@ public final class SectorPowerGridMath{
                     changed = true;
                 }
             }
+            if(changed){
+                invalidateTopology();
+            }
             return changed;
         }
 
         public void updateSectorTelemetry(int sectorId, float producedPerTick, float neededPerTick, float batteryStored, float batteryCapacity, long nowMs){
             SectorPowerNode node = getOrCreateNode(sectorId);
+            boolean wasHub = node.hasHub;
             node.hasHub = true;
             node.updateTelemetry(producedPerTick, neededPerTick, batteryStored, batteryCapacity, nowMs);
+            if(!wasHub){
+                invalidateTopology();
+            }else{
+                invalidateTelemetry();
+            }
         }
 
         public boolean areLinked(int a, int b){
@@ -274,6 +303,7 @@ public final class SectorPowerGridMath{
             edges.put(link.packedKey(), link);
             adjacency.computeIfAbsent(a, k -> new HashSet<>()).add(b);
             adjacency.computeIfAbsent(b, k -> new HashSet<>()).add(a);
+            invalidateTopology();
         }
 
         public boolean removeLink(int a, int b){
@@ -283,6 +313,7 @@ public final class SectorPowerGridMath{
             if(na != null) na.remove(b);
             Set<Integer> nb = adjacency.get(b);
             if(nb != null) nb.remove(a);
+            invalidateTopology();
             return true;
         }
 
@@ -296,6 +327,7 @@ public final class SectorPowerGridMath{
                     otherAdj.remove(sectorId);
                 }
             }
+            invalidateTopology();
             return true;
         }
 
@@ -319,9 +351,18 @@ public final class SectorPowerGridMath{
             return out;
         }
 
-        /** BFS connected component containing {@code rootSectorId} (only traverses active-hub nodes). */
+        /** BFS connected component containing {@code rootSectorId} (cached per topologyVersion). */
         public int[] getConnectedComponent(int rootSectorId){
             if(!hasHub(rootSectorId)) return new int[0];
+
+            if(cachedComponentVersion != topologyVersion){
+                componentCache.clear();
+                cachedComponentVersion = topologyVersion;
+            }
+            int[] cached = componentCache.get(rootSectorId);
+            if(cached != null){
+                return cached;
+            }
 
             Set<Integer> visited = new LinkedHashSet<>();
             ArrayDeque<Integer> queue = new ArrayDeque<>();
@@ -345,11 +386,27 @@ public final class SectorPowerGridMath{
                 result[idx++] = id;
             }
             Arrays.sort(result);
+            for(int id : result){
+                componentCache.put(id, result);
+            }
             return result;
         }
 
-        /** Computes aggregated production, consumption, shared storage, and satisfaction for a sector's grid. */
+        /** Computes aggregated production, consumption, shared storage, and satisfaction (cached per telemetryVersion). */
         public GridAggregate computeAggregate(int sectorId){
+            if(!hasHub(sectorId)){
+                return new GridAggregate(new int[0], 0f, 0f, 0f, 0f, 0f);
+            }
+
+            if(cachedAggregateVersion != telemetryVersion){
+                aggregateCache.clear();
+                cachedAggregateVersion = telemetryVersion;
+            }
+            GridAggregate cached = aggregateCache.get(sectorId);
+            if(cached != null){
+                return cached;
+            }
+
             int[] comp = getConnectedComponent(sectorId);
             if(comp.length == 0){
                 return new GridAggregate(comp, 0f, 0f, 0f, 0f, 0f);
@@ -380,7 +437,11 @@ public final class SectorPowerGridMath{
                 satisfaction = clamp(available / need, 0f, 1f);
             }
 
-            return new GridAggregate(comp, prod, need, stored, cap, satisfaction);
+            GridAggregate agg = new GridAggregate(comp, prod, need, stored, cap, satisfaction);
+            for(int id : comp){
+                aggregateCache.put(id, agg);
+            }
+            return agg;
         }
 
         /**
@@ -486,6 +547,7 @@ public final class SectorPowerGridMath{
             SectorPowerNode activeNode = nodes.get(activeSectorId);
             if(activeNode != null){
                 activeNode.batteryStored = postLocalStored;
+                invalidateTelemetry();
             }
 
             float postTotalStored = clamp(totalStoredBefore + localBatteryDelta + remoteBatteryDelta, 0f, totalCap);
@@ -516,7 +578,7 @@ public final class SectorPowerGridMath{
             );
         }
 
-        private void applyRemoteBatteryDelta(int[] comp, int excludeSectorId, float delta){
+        private boolean applyRemoteBatteryDelta(int[] comp, int excludeSectorId, float delta){
             if(delta < 0f){
                 float totalAvail = 0f;
                 for(int id : comp){
@@ -524,7 +586,7 @@ public final class SectorPowerGridMath{
                     SectorPowerNode n = nodes.get(id);
                     if(n != null && n.hasHub) totalAvail += n.batteryStored;
                 }
-                if(totalAvail <= 0.00001f) return;
+                if(totalAvail <= 0.00001f) return false;
                 float ratio = Math.min(1f, (-delta) / totalAvail);
                 for(int id : comp){
                     if(id == excludeSectorId) continue;
@@ -533,6 +595,8 @@ public final class SectorPowerGridMath{
                         n.batteryStored = Math.max(0f, n.batteryStored * (1f - ratio));
                     }
                 }
+                invalidateTelemetry();
+                return true;
             }else if(delta > 0f){
                 float totalFree = 0f;
                 for(int id : comp){
@@ -542,7 +606,7 @@ public final class SectorPowerGridMath{
                         totalFree += Math.max(0f, n.batteryCapacity - n.batteryStored);
                     }
                 }
-                if(totalFree <= 0.00001f) return;
+                if(totalFree <= 0.00001f) return false;
                 float ratio = Math.min(1f, delta / totalFree);
                 for(int id : comp){
                     if(id == excludeSectorId) continue;
@@ -552,7 +616,10 @@ public final class SectorPowerGridMath{
                         n.batteryStored = Math.min(n.batteryCapacity, n.batteryStored + free * ratio);
                     }
                 }
+                invalidateTelemetry();
+                return true;
             }
+            return false;
         }
 
         /**
@@ -560,9 +627,15 @@ public final class SectorPowerGridMath{
          * NOT contain any currently simulated sector). Runs once per second in Universe.update().
          */
         public void stepBackgroundComponents(Set<Integer> activelySimulatedSectorIds, float dtSeconds){
-            if(dtSeconds <= 0f || nodes.isEmpty()) return;
+            stepBackgroundComponentsTracked(activelySimulatedSectorIds, dtSeconds);
+        }
+
+        /** Variant of {@link #stepBackgroundComponents} returning true if any background battery changed. */
+        public boolean stepBackgroundComponentsTracked(Set<Integer> activelySimulatedSectorIds, float dtSeconds){
+            if(dtSeconds <= 0f || nodes.isEmpty()) return false;
             float dtTicks = dtSeconds * 60f;
             Set<Integer> visited = new HashSet<>();
+            boolean anyBatteryChanged = false;
 
             for(SectorPowerNode node : nodes.values()){
                 if(!node.hasHub || visited.contains(node.sectorId)) continue;
@@ -585,9 +658,12 @@ public final class SectorPowerGridMath{
                 }
                 float energyDelta = netPerTick * dtTicks;
                 if(Math.abs(energyDelta) > 0.0001f){
-                    applyRemoteBatteryDelta(comp, -1, energyDelta);
+                    if(applyRemoteBatteryDelta(comp, -1, energyDelta)){
+                        anyBatteryChanged = true;
+                    }
                 }
             }
+            return anyBatteryChanged;
         }
 
         // ==================== BINARY SERIALIZATION ====================

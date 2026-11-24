@@ -40,6 +40,19 @@ public class Universe{
                 state.getSector().planet.updateBaseCoverage();
             }
         });
+
+        // V3.2: Flush all queued background sector updates whenever a sector save is written or the app exits
+        Events.on(SaveWriteEvent.class, e -> {
+            if(!net.isConnectedClient() && state != null && state.isCampaign()){
+                flushAllBackgroundState(true);
+            }
+        });
+
+        Events.on(DisposeEvent.class, e -> {
+            if(net == null || !net.isConnectedClient()){
+                flushAllBackgroundState(true);
+            }
+        });
     }
 
     /** Update regardless of whether the player is in the campaign. */
@@ -198,11 +211,8 @@ public class Universe{
 
                     //attacked sectors are frozen in time; don't update those
                     if(!sector.isAttacked()){
-                        if(!sector.isBeingPlayed()){
-                            //prevent negative values with unloaders and ensure background info is saved
-                            sector.info.items.checkNegative();
-                            sector.saveInfo();
-                        }
+                        // V3.2: Background inventory persistence is handled incrementally via GlobalStrategyManager's
+                        // batched dirty-sector queue (no 272-sector full JSON spike every 2 minutes).
 
                         //queue random invasions
                         if(sector.planet.campaignRules.sectorInvasion && sector.info.minutesCaptured > invasionGracePeriod && sector.info.hasSpawns){
@@ -266,13 +276,23 @@ public class Universe{
         return seconds() + secondCounter;
     }
 
+    private void flushAllBackgroundState(boolean manualSaveDisk){
+        if(Core.settings == null) return;
+        strategy.flushDirtySectors();
+        SectorPowerGridManager.get().saveIfDirty(false);
+        SectorConveyorManager.get().saveIfDirty(false);
+        if(manualSaveDisk){
+            Core.settings.manualSave();
+        }
+    }
+
     private void save(){
         if(net.isConnectedClient()) return;
         Core.settings.put("utimei", seconds);
         Core.settings.put("turn", turn);
-        strategy.flushDirtySectors();
-        SectorPowerGridManager.get().save(false);
-        SectorConveyorManager.get().save(false);
+        strategy.flushDirtySectorsBatched(GlobalStrategyManager.DEFAULT_FLUSH_BATCH_SIZE);
+        SectorPowerGridManager.get().saveIfDirty(false);
+        SectorConveyorManager.get().saveIfDirty(false);
         Core.settings.manualSave();
     }
 

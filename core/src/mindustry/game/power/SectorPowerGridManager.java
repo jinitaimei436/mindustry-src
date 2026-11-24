@@ -64,7 +64,7 @@ public class SectorPowerGridManager{
 
         Events.on(SaveWriteEvent.class, e -> {
             if(state != null && state.isCampaign()){
-                saveIfAuthoritative(true);
+                saveIfDirty(true);
             }
         });
 
@@ -319,7 +319,7 @@ public class SectorPowerGridManager{
             return null;
         }
 
-        return topo.resolveActiveSectorTick(
+        PowerStepResult res = topo.resolveActiveSectorTick(
             sec.id,
             localProducedTick,
             localNeededTick,
@@ -328,6 +328,10 @@ public class SectorPowerGridManager{
             dt,
             Time.millis()
         );
+        if(res != null && Math.abs(res.remoteBatteryDelta) > 0.0001f){
+            dirty = true;
+        }
+        return res;
     }
 
     /**
@@ -364,21 +368,27 @@ public class SectorPowerGridManager{
             }
         }
 
-        topo.stepBackgroundComponents(activeSimIds, dtSeconds);
+        boolean batteryChanged = topo.stepBackgroundComponentsTracked(activeSimIds, dtSeconds);
+        if(batteryChanged){
+            dirty = true;
+        }
 
         if(pruned){
             markChanged();
             notifyNetworkChange();
         }
-        if(dirty){
-            saveIfAuthoritative(false);
-        }
+        // V3.2: Persistence is handled by Universe.save() every 10s (and immediately on structural edits/SaveWriteEvent)
     }
 
     // ==================== PERSISTENCE & V2 MULTIPLAYER SYNC ====================
 
     private void saveIfAuthoritative(boolean flushDisk){
         if(net != null && net.isConnectedClient()) return;
+        save(flushDisk);
+    }
+
+    public void saveIfDirty(boolean flushDisk){
+        if(!dirty) return;
         save(flushDisk);
     }
 

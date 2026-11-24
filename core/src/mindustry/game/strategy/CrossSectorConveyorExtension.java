@@ -31,6 +31,8 @@ import static mindustry.Vars.*;
  *      and freeze status.
  */
 public class CrossSectorConveyorExtension implements CrossSectorExtension{
+    private final HashMap<Integer, Float> scratchPowerEfficiency = new HashMap<>();
+    private final HashSet<Integer> scratchFrozenSectorIds = new HashSet<>();
 
     @Override
     public String extensionId(){
@@ -90,10 +92,11 @@ public class CrossSectorConveyorExtension implements CrossSectorExtension{
         for(SectorStrategyProfile profile : engine.sectors.values()){
             if(profile == null || !profile.hasBase || profile.foregroundActive || profile.underAttack) continue;
 
-            List<SectorPortRecord> ports = topo.getAllSectorPorts(profile.sectorId);
+            List<SectorPortRecord> ports = topo.getAllSectorPortsReadOnly(profile.sectorId);
             if(ports.isEmpty()) continue;
 
-            for(SectorPortRecord port : ports){
+            for(int pi = 0; pi < ports.size(); pi++){
+                SectorPortRecord port = ports.get(pi);
                 if(!port.isSender){
                     // Drain background receiver FIFO into sector storage at up to receiver release rate
                     if(port.isEmpty()){
@@ -162,14 +165,14 @@ public class CrossSectorConveyorExtension implements CrossSectorExtension{
         SectorConveyorManager cm = SectorConveyorManager.get();
         PlanetConveyorTopology topo = cm.getTopology(planet);
 
-        HashMap<Integer, Float> sectorPowerEfficiency = new HashMap<>();
-        HashSet<Integer> frozenSectorIds = new HashSet<>();
+        scratchPowerEfficiency.clear();
+        scratchFrozenSectorIds.clear();
 
         for(SectorStrategyProfile p : engine.sectors.values()){
             if(p == null) continue;
-            sectorPowerEfficiency.put(p.sectorId, Math.max(0f, Math.min(1f, p.solvedPowerSatisfaction)));
+            scratchPowerEfficiency.put(p.sectorId, Math.max(0f, Math.min(1f, p.solvedPowerSatisfaction)));
             if(!p.hasBase || p.underAttack){
-                frozenSectorIds.add(p.sectorId);
+                scratchFrozenSectorIds.add(p.sectorId);
             }
         }
 
@@ -178,13 +181,15 @@ public class CrossSectorConveyorExtension implements CrossSectorExtension{
             for(SectorStrategyProfile profile : engine.sectors.values()){
                 if(profile == null || !profile.hasBase || profile.foregroundActive || profile.underAttack) continue;
 
-                List<SectorPortRecord> senders = topo.getSectorPorts(profile.sectorId, true);
-                if(senders.isEmpty()) continue;
+                List<SectorPortRecord> ports = topo.getAllSectorPortsReadOnly(profile.sectorId);
+                if(ports.isEmpty()) continue;
 
-                for(SectorPortRecord sender : senders){
+                for(int pi = 0; pi < ports.size(); pi++){
+                    SectorPortRecord sender = ports.get(pi);
+                    if(!sender.isSender) break; // Senders are always ordered before receivers in bucket
                     SectorConveyorLink link = topo.getLinkForSender(profile.sectorId, sender.portNumber);
                     if(link == null) continue;
-                    if(frozenSectorIds.contains(link.receiverSectorId)) continue;
+                    if(scratchFrozenSectorIds.contains(link.receiverSectorId)) continue;
 
                     SectorPortRecord receiver = topo.getPort(link.receiverSectorId, false, link.receiverPortNumber);
                     if(receiver == null || receiver.isFull()) continue;
@@ -228,6 +233,6 @@ public class CrossSectorConveyorExtension implements CrossSectorExtension{
         }
 
         // Advance background conveyor links (sender FIFO -> receiver FIFO) with solved power & freeze state
-        cm.updateGlobalSecond(planet, dtSeconds, sectorPowerEfficiency, frozenSectorIds);
+        cm.updateGlobalSecond(planet, dtSeconds, scratchPowerEfficiency, scratchFrozenSectorIds);
     }
 }

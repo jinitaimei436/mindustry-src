@@ -64,7 +64,7 @@ public class SectorConveyorManager{
 
         Events.on(SaveWriteEvent.class, e -> {
             if(state != null && state.isCampaign()){
-                saveIfAuthoritative(true);
+                saveIfDirty(true);
             }
         });
 
@@ -383,22 +383,29 @@ public class SectorConveyorManager{
             localActiveIds.add(state.getSector().id);
         }
 
-        topo.stepBackgroundLinks(localActiveIds, sectorPowerEfficiency, frozenSectorIds, dtSeconds);
-        uiRevision++;
+        boolean anyActivity = topo.stepBackgroundLinksTracked(localActiveIds, sectorPowerEfficiency, frozenSectorIds, dtSeconds);
+        if(anyActivity){
+            uiRevision++;
+            dirty = true;
+        }
 
         if(pruned){
             markChanged();
             notifyNetworkChange();
         }
-        if(dirty){
-            saveIfAuthoritative(false);
-        }
+        // V3.2: Avoid per-second Base64 serialization of all planet ports; Universe.save() persists dirty state every 10s,
+        // while structural edits (build/destroy/pair) and SaveWriteEvent flush immediately.
     }
 
     // ==================== PERSISTENCE & V2 MULTIPLAYER SYNC ====================
 
     private void saveIfAuthoritative(boolean flushDisk){
         if(net != null && net.isConnectedClient()) return;
+        save(flushDisk);
+    }
+
+    public void saveIfDirty(boolean flushDisk){
+        if(!dirty) return;
         save(flushDisk);
     }
 

@@ -27,8 +27,10 @@ public class GlobalStrategyManager{
      * instead of overwriting them on the next 1-second tick.
      */
     private final HashMap<String, HashMap<Integer, HashMap<String, Integer>>> lastSyncedStorage = new HashMap<>();
-    /** Background sectors whose inventory changed since the last disk flush. */
-    private final HashSet<Sector> dirtySectors = new HashSet<>();
+    /** Max background sectors serialized per periodic 10-second save tick to keep main-thread spikes < 5ms. */
+    public static final int DEFAULT_FLUSH_BATCH_SIZE = 30;
+    /** FIFO-ordered background sectors whose inventory changed since the last disk flush. */
+    private final LinkedHashSet<Sector> dirtySectors = new LinkedHashSet<>();
     /** Ordered pluggable cross-sector subsystems (power grid, conveyors, future devices). */
     private final ArrayList<CrossSectorExtension> extensions = new ArrayList<>();
     private final LogisticsPolicy policy;
@@ -68,7 +70,7 @@ public class GlobalStrategyManager{
         }
     }
 
-    /** Persists all background sectors modified by real-time settlement since the last flush. */
+    /** Persists ALL background sectors modified by real-time settlement (used on sector switch, save write, or exit). */
     public void flushDirtySectors(){
         if(dirtySectors.isEmpty()) return;
         for(Sector sector : dirtySectors){
@@ -78,6 +80,33 @@ public class GlobalStrategyManager{
             }
         }
         dirtySectors.clear();
+    }
+
+    /**
+     * Persists up to {@code maxBatchSize} dirty background sectors in fair FIFO order.
+     * Remaining dirty sectors stay queued for the next periodic save tick, smoothing out
+     * 272-sector late-game JSON serialization without stalling the main thread.
+     *
+     * @return number of background sectors flushed in this batch.
+     */
+    public int flushDirtySectorsBatched(int maxBatchSize){
+        if(dirtySectors.isEmpty() || maxBatchSize <= 0) return 0;
+        int flushed = 0;
+        Iterator<Sector> it = dirtySectors.iterator();
+        while(it.hasNext() && flushed < maxBatchSize){
+            Sector sector = it.next();
+            it.remove();
+            if(sector != null && sector.hasBase() && !sector.isBeingPlayed()){
+                sector.info.items.checkNegative();
+                sector.saveInfo();
+                flushed++;
+            }
+        }
+        return flushed;
+    }
+
+    public int getDirtySectorCount(){
+        return dirtySectors.size();
     }
 
     public void setAIController(StrategicAIController controller){

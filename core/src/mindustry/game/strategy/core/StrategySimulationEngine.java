@@ -17,6 +17,11 @@ public class StrategySimulationEngine{
     private final PlanetNetworkSolver solver;
     private StrategicAIController aiController;
 
+    /** V3.2: Cap substep subdivision on 1s real-time ticks to prevent 272-sector inflection avalanches. */
+    public int maxRealtimeSubSteps = 4;
+    public float minRealtimeSubStep = 0.25f;
+    public int maxBatchSubSteps = 64;
+
     private double elapsedSeconds = 0.0;
 
     public StrategySimulationEngine(){
@@ -66,16 +71,29 @@ public class StrategySimulationEngine{
      */
     public void step(float dtSeconds){
         float remaining = dtSeconds;
+        boolean realtimeStep = dtSeconds <= 2.5f;
+        int maxSteps = realtimeStep ? Math.max(1, maxRealtimeSubSteps) : Math.max(1, maxBatchSubSteps);
+        float minStep = realtimeStep ? Math.max(1e-3f, minRealtimeSubStep) : 1e-3f;
         int safetyGuard = 0;
+        boolean solvedAtLeastOnce = false;
+        boolean boundaryChangedOnLastStep = false;
 
-        while(remaining > 1e-4f && safetyGuard++ < 64){
+        while(remaining > 1e-4f && safetyGuard < maxSteps){
+            safetyGuard++;
             // 1. Solve instantaneous rates
             solver.solve(sectors, routes, remaining);
+            solvedAtLeastOnce = true;
 
             // 2. Find earliest inflection event within remaining window
-            float subStep = Math.min(remaining, findNextInflectionTime(remaining));
-            if(subStep < 1e-3f){
-                subStep = Math.min(remaining, 1e-3f);
+            float subStep;
+            if(safetyGuard >= maxSteps){
+                // Final allowed substep consumes whatever window remains so elapsedSeconds stays exact
+                subStep = remaining;
+            }else{
+                subStep = Math.min(remaining, findNextInflectionTime(remaining));
+                if(subStep < minStep){
+                    subStep = Math.min(remaining, minStep);
+                }
             }
 
             // 3. Emit delayed shipments at the start of subStep for routes with transitSeconds > 0
@@ -93,10 +111,11 @@ public class StrategySimulationEngine{
             }
 
             // 4. Advance all in-transit shipments by subStep
-            advanceShipments(subStep);
+            boolean shipmentArrived = advanceShipments(subStep);
 
             // 5. Apply solved net rates to background sectors' storage buffers, and accumulate
             // direct deliveries for foreground sectors when legacy core delivery is active.
+            boolean storageBoundaryTouched = shipmentArrived;
             for(SectorStrategyProfile s : sectors.values()){
                 if(!s.hasBase || (policy.freezeUnderAttack() && s.underAttack)) continue;
                 if(s.foregroundActive){
@@ -116,7 +135,15 @@ public class StrategySimulationEngine{
                 for(Map.Entry<String, Float> e : s.solvedNetRates.entrySet()){
                     float delta = e.getValue() * subStep;
                     if(Math.abs(delta) > 1e-6f){
-                        s.addStored(e.getKey(), delta);
+                        String itemKey = e.getKey();
+                        float before = s.getStored(itemKey);
+                        s.addStored(itemKey, delta);
+                        float after = s.getStored(itemKey);
+                        boolean hitEmpty = before > 1e-4f && after <= 1e-4f;
+                        boolean hitFull = s.storageCapacity > 0 && before < s.storageCapacity - 1e-4f && after >= s.storageCapacity - 1e-4f;
+                        if(hitEmpty || hitFull){
+                            storageBoundaryTouched = true;
+                        }
                     }
                 }
             }
@@ -134,11 +161,14 @@ public class StrategySimulationEngine{
                 }
             }
 
+            boundaryChangedOnLastStep = storageBoundaryTouched;
             remaining -= subStep;
         }
 
-        // Refresh readouts at the end of the step
-        solver.solve(sectors, routes, 1f);
+        // Refresh readouts only if nothing was solved yet or the final substep crossed a full/empty/arrival boundary
+        if(!solvedAtLeastOnce || boundaryChangedOnLastStep){
+            solver.solve(sectors, routes, 1f);
+        }
     }
 
     private float findNextInflectionTime(float maxStep){
@@ -174,7 +204,8 @@ public class StrategySimulationEngine{
         return earliest;
     }
 
-    private void advanceShipments(float dt){
+    private boolean advanceShipments(float dt){
+        boolean arrived = false;
         Iterator<LogisticsRoute.InTransitShipment> it = inTransitShipments.iterator();
         while(it.hasNext()){
             LogisticsRoute.InTransitShipment ship = it.next();
@@ -192,8 +223,10 @@ public class StrategySimulationEngine{
                     }
                 }
                 it.remove();
+                arrived = true;
             }
         }
+        return arrived;
     }
 
     private void advanceTroopDispatches(float dt){
