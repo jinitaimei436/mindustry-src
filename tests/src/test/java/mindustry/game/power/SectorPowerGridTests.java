@@ -19,7 +19,7 @@ public class SectorPowerGridTests{
 
     @Test
     void versionForkTagIsCurrent(){
-        assertEquals("v3.2", Version.forkVersion);
+        assertEquals("v3.9", Version.forkVersion);
     }
 
     @Test
@@ -246,5 +246,93 @@ public class SectorPowerGridTests{
         assertEquals(2, HubAnimationController.reverseFrameIndex(4, 0.25f));
         assertEquals(0, HubAnimationController.reverseFrameIndex(4, 1f));
     }
+
+    @Test
+    void localPowerSnapshotsStayIsolatedFromHubTopologyAndRoundtripV2() throws IOException{
+        PlanetPowerTopology original = new PlanetPowerTopology();
+        original.updateSectorTelemetry(3, 120f, 40f, 5500f, 10000f, 0L);
+        original.updateSectorTelemetry(7, 30f, 90f, 2500f, 5000f, 0L);
+        assertTrue(original.addLink(3, 7, true));
+
+        // Sector 9 has local power only (NO Surge Sector Power Hub)
+        original.updateLocalSnapshot(9, 480f, 300f, 12000f, 40000f);
+
+        assertFalse(original.hasHub(9));
+        assertFalse(original.canLink(7, 9, true));
+        assertEquals(0, original.toggleLink(7, 9, true));
+        assertArrayEquals(new int[0], original.getConnectedComponent(9));
+        assertFalse(original.getHubSectorIds().contains(9));
+
+        LocalPowerSnapshot snap = original.getLocalSnapshot(9);
+        assertNotNull(snap);
+        assertEquals(480f, snap.producedPerSec, 1e-4f);
+        assertEquals(300f, snap.neededPerSec, 1e-4f);
+        assertEquals(12000f, snap.batteryStored, 1e-4f);
+        assertEquals(40000f, snap.batteryCapacity, 1e-4f);
+        assertEquals(1f, snap.satisfaction(), 1e-4f);
+
+        // V2 binary roundtrip preserves both hub topology and non-hub snapshots
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        try(DataOutputStream out = new DataOutputStream(baos)){
+            original.writeToStream(out);
+        }
+
+        PlanetPowerTopology restored = new PlanetPowerTopology();
+        try(DataInputStream in = new DataInputStream(new ByteArrayInputStream(baos.toByteArray()))){
+            restored.readFromStream(in);
+        }
+
+        assertTrue(restored.hasHub(3));
+        assertTrue(restored.hasHub(7));
+        assertTrue(restored.areLinked(3, 7));
+        assertFalse(restored.hasHub(9));
+
+        LocalPowerSnapshot restoredSnap = restored.getLocalSnapshot(9);
+        assertNotNull(restoredSnap);
+        assertEquals(480f, restoredSnap.producedPerSec, 1e-4f);
+        assertEquals(300f, restoredSnap.neededPerSec, 1e-4f);
+        assertEquals(12000f, restoredSnap.batteryStored, 1e-4f);
+        assertEquals(40000f, restoredSnap.batteryCapacity, 1e-4f);
+
+        assertTrue(restored.removeLocalSnapshot(9));
+        assertNull(restored.getLocalSnapshot(9));
+    }
+
+    @Test
+    void legacyV1StreamDeserializesCleanlyIntoV2Topology() throws IOException{
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        try(DataOutputStream out = new DataOutputStream(baos)){
+            out.writeInt(1); // legacy STREAM_VERSION = 1
+            out.writeInt(2); // 2 hub nodes
+            out.writeInt(4);
+            out.writeFloat(100f);
+            out.writeFloat(20f);
+            out.writeFloat(3000f);
+            out.writeFloat(8000f);
+            out.writeInt(5);
+            out.writeFloat(10f);
+            out.writeFloat(50f);
+            out.writeFloat(1000f);
+            out.writeFloat(4000f);
+            out.writeInt(1); // 1 link
+            out.writeInt(4);
+            out.writeInt(5);
+        }
+
+        PlanetPowerTopology restored = new PlanetPowerTopology();
+        try(DataInputStream in = new DataInputStream(new ByteArrayInputStream(baos.toByteArray()))){
+            restored.readFromStream(in);
+        }
+
+        assertTrue(restored.hasHub(4));
+        assertTrue(restored.hasHub(5));
+        assertTrue(restored.areLinked(4, 5));
+        assertNull(restored.getLocalSnapshot(4));
+        GridAggregate agg = restored.computeAggregate(4);
+        assertEquals(2, agg.sectorCount());
+        assertEquals(110f, agg.totalProduced, 1e-4f);
+        assertEquals(70f, agg.totalNeeded, 1e-4f);
+    }
 }
+
 

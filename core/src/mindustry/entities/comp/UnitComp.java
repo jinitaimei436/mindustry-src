@@ -40,7 +40,7 @@ abstract class UnitComp implements Healthc, Physicsc, Hitboxc, Statusc, Teamc, I
     static final float warpDst = 8f;
 
     @Import boolean dead, disarmed;
-    @Import float x, y, rotation, maxHealth, drag, armor, hitSize, health, shield, dragMultiplier, armorOverride, speedMultiplier;
+    @Import float x, y, rotation, maxHealth, drag, armor, hitSize, health, shield, dragMultiplier, armorOverride, speedMultiplier, healMultiplier;
     @Import Team team;
     @Import int id;
     @Import @Nullable Tile mineTile;
@@ -631,11 +631,15 @@ abstract class UnitComp implements Healthc, Physicsc, Hitboxc, Statusc, Teamc, I
         type.landed(self());
     }
 
+    @Replace
     @Override
     public void heal(float amount){
-        if(health < maxHealth && amount > 0){
+        float effective = amount > 0f ? amount * healMultiplier : amount;
+        if(health < maxHealth && effective > 0f){
             wasHealed = true;
         }
+        health += effective;
+        clampHealth();
     }
 
     public void updateDrowning(){

@@ -209,6 +209,28 @@ public class FormationManager implements CustomChunk{
         return changed;
     }
 
+    /**
+     * Authoritatively creates a persistent formation from spawned/unloaded units
+     * (used by the V3.9 Cross-Sector Troop Airlift System to restore formations on landing or pad unload).
+     */
+    public @Nullable TacticalFormation createFormationFromUnits(@Nullable Team team, @Nullable Seq<Unit> units, boolean rallyMembers){
+        if(team == null || units == null || units.size < 2) return null;
+        init();
+        IntSeq ids = new IntSeq(units.size);
+        for(int i = 0; i < units.size; i++){
+            Unit u = units.get(i);
+            if(isValidMember(u, team.id) && !ids.contains(u.id)){
+                ids.add(u.id);
+            }
+        }
+        if(ids.size < 2) return null;
+        TacticalFormation created = createFormationAuthoritative(team.id, ids, rallyMembers);
+        if(created != null && net != null && net.server()){
+            broadcastFullSync();
+        }
+        return created;
+    }
+
     // ==================== AUTHORITATIVE MUTATIONS ====================
 
     private @Nullable TacticalFormation createFormationAuthoritative(int teamId, IntSeq unitIds, boolean rallyMembers){

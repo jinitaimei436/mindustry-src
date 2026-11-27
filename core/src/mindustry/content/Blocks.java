@@ -13,6 +13,7 @@ import mindustry.entities.part.*;
 import mindustry.entities.pattern.*;
 import mindustry.game.*;
 import mindustry.game.logistics.*;
+import mindustry.game.troops.TroopAirliftMath.*;
 import mindustry.gen.*;
 import mindustry.graphics.*;
 import mindustry.type.*;
@@ -183,6 +184,7 @@ public class Blocks{
 
     //campaign
     launchPad, advancedLaunchPad, landingPad,
+    lowTroopLaunchPad, highTroopLaunchPad, specialTroopLaunchPad,
     interplanetaryAccelerator
 
     ;
@@ -6982,6 +6984,24 @@ public class Blocks{
             consumePower(10f);
             buildCostMultiplier = 0.5f;
             scaledHealth = 80;
+        }};
+
+        lowTroopLaunchPad = new TroopLaunchPad("low-troop-launch-pad", PadTier.LOW){{
+            requirements(Category.units, BuildVisibility.campaignOnly, with(Items.copper, 260, Items.graphite, 180, Items.silicon, 220, Items.titanium, 140));
+            scaledHealth = 70;
+            accentColor = Color.valueOf("84f491");
+        }};
+
+        highTroopLaunchPad = new TroopLaunchPad("high-troop-launch-pad", PadTier.HIGH){{
+            requirements(Category.units, BuildVisibility.campaignOnly, with(Items.copper, 450, Items.silicon, 420, Items.titanium, 360, Items.plastanium, 220, Items.thorium, 180));
+            scaledHealth = 85;
+            accentColor = Pal.accent;
+        }};
+
+        specialTroopLaunchPad = new TroopLaunchPad("special-troop-launch-pad", PadTier.SPECIAL){{
+            requirements(Category.units, BuildVisibility.campaignOnly, with(Items.silicon, 900, Items.plastanium, 550, Items.thorium, 500, Items.surgeAlloy, 360, Items.phaseFabric, 240));
+            scaledHealth = 110;
+            accentColor = Color.valueOf("f3e979");
         }};
 
         //endregion campaign

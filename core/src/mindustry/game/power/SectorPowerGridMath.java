@@ -20,7 +20,7 @@ import java.util.*;
  *   vanilla Mindustry PowerGraph brownout semantics.
  */
 public final class SectorPowerGridMath{
-    public static final int STREAM_VERSION = 1;
+    public static final int STREAM_VERSION = 2;
 
     private SectorPowerGridMath(){
     }
@@ -52,6 +52,30 @@ public final class SectorPowerGridMath{
             this.needed = 0f;
             this.batteryStored = 0f;
             this.batteryCapacity = 0f;
+        }
+    }
+
+    /** Lightweight local power snapshot (power/sec & raw battery energy) for sectors without an active hub. */
+    public static class LocalPowerSnapshot{
+        public final int sectorId;
+        public float producedPerSec;
+        public float neededPerSec;
+        public float batteryStored;
+        public float batteryCapacity;
+
+        public LocalPowerSnapshot(int sectorId, float producedPerSec, float neededPerSec, float batteryStored, float batteryCapacity){
+            this.sectorId = sectorId;
+            this.producedPerSec = Math.max(0f, producedPerSec);
+            this.neededPerSec = Math.max(0f, neededPerSec);
+            this.batteryCapacity = Math.max(0f, batteryCapacity);
+            this.batteryStored = clamp(batteryStored, 0f, this.batteryCapacity);
+        }
+
+        public float satisfaction(){
+            if(neededPerSec <= 0.0001f) return 1f;
+            float available = producedPerSec + batteryStored;
+            if(available <= 0.0001f) return 0f;
+            return Math.min(1f, available / neededPerSec);
         }
     }
 
@@ -187,6 +211,8 @@ public final class SectorPowerGridMath{
      */
     public static class PlanetPowerTopology{
         private final java.util.Map<Integer, SectorPowerNode> nodes = new HashMap<>();
+        /** Isolated local power snapshots for non-hub sectors (never participates in cross-sector grid BFS/links). */
+        private final java.util.Map<Integer, LocalPowerSnapshot> localSnapshots = new HashMap<>();
         private final java.util.Map<Integer, Set<Integer>> adjacency = new HashMap<>();
         private final java.util.Map<Long, SectorLink> edges = new HashMap<>();
 
@@ -209,11 +235,24 @@ public final class SectorPowerGridMath{
 
         public void clear(){
             nodes.clear();
+            localSnapshots.clear();
             adjacency.clear();
             edges.clear();
             componentCache.clear();
             aggregateCache.clear();
             invalidateTopology();
+        }
+
+        public void updateLocalSnapshot(int sectorId, float producedPerSec, float neededPerSec, float batteryStored, float batteryCapacity){
+            localSnapshots.put(sectorId, new LocalPowerSnapshot(sectorId, producedPerSec, neededPerSec, batteryStored, batteryCapacity));
+        }
+
+        public LocalPowerSnapshot getLocalSnapshot(int sectorId){
+            return localSnapshots.get(sectorId);
+        }
+
+        public boolean removeLocalSnapshot(int sectorId){
+            return localSnapshots.remove(sectorId) != null;
         }
 
         public SectorPowerNode getOrCreateNode(int sectorId){
@@ -698,12 +737,24 @@ public final class SectorPowerGridMath{
                 out.writeInt(link.a);
                 out.writeInt(link.b);
             }
+
+            // STREAM_VERSION >= 2: isolated non-hub local power snapshots
+            List<LocalPowerSnapshot> sortedSnapshots = new ArrayList<>(localSnapshots.values());
+            Collections.sort(sortedSnapshots, (a, b) -> Integer.compare(a.sectorId, b.sectorId));
+            out.writeInt(sortedSnapshots.size());
+            for(LocalPowerSnapshot snap : sortedSnapshots){
+                out.writeInt(snap.sectorId);
+                out.writeFloat(snap.producedPerSec);
+                out.writeFloat(snap.neededPerSec);
+                out.writeFloat(snap.batteryStored);
+                out.writeFloat(snap.batteryCapacity);
+            }
         }
 
         public void readFromStream(DataInput in) throws IOException{
             clear();
             int version = in.readInt();
-            if(version != STREAM_VERSION) return;
+            if(version < 1 || version > STREAM_VERSION) return;
 
             int nodeCount = Math.max(0, in.readInt());
             for(int i = 0; i < nodeCount; i++){
@@ -721,6 +772,18 @@ public final class SectorPowerGridMath{
                 int b = in.readInt();
                 if(hasHub(a) && hasHub(b) && a != b){
                     addLinkInternal(a, b);
+                }
+            }
+
+            if(version >= 2){
+                int snapCount = Math.max(0, in.readInt());
+                for(int i = 0; i < snapCount; i++){
+                    int sectorId = in.readInt();
+                    float prod = in.readFloat();
+                    float need = in.readFloat();
+                    float stored = in.readFloat();
+                    float cap = in.readFloat();
+                    updateLocalSnapshot(sectorId, prod, need, stored, cap);
                 }
             }
         }

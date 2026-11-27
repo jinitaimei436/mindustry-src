@@ -1,6 +1,8 @@
 package mindustry.world.blocks.distribution;
 
 import arc.*;
+import arc.Graphics.*;
+import arc.Graphics.Cursor.*;
 import arc.graphics.*;
 import arc.graphics.g2d.*;
 import arc.math.*;
@@ -74,6 +76,7 @@ public class SectorConveyorPort extends Block{
     @Override
     public void init(){
         acceptsItems = isSender;
+        configurable = isSender;
         itemCapacity = SectorConveyorMath.capacityForTier(portTier);
         transferRate = SectorConveyorMath.rateForTier(portTier);
         super.init();
@@ -113,7 +116,7 @@ public class SectorConveyorPort extends Block{
         }else{
             stats.add(Stat.input, intakeRate, StatUnit.itemsSecond);
             stats.add(Stat.output, transferRate, StatUnit.itemsSecond);
-            stats.add(Stat.abilities, "接收端不限建造数量；仅正面居中 " + (size == 4 ? "2 格" : "1 格") + "释放物品，可在星球资源视野与相邻起始端 1 对 1 绑定");
+            stats.add(Stat.abilities, "接收端不限建造数量；仅正面居中 " + (size == 4 ? "2 格" : "1 格") + "释放物品，可在相邻区块的起始端上点击配对");
         }
     }
 
@@ -128,7 +131,7 @@ public class SectorConveyorPort extends Block{
                 Sector sec = state.getSector();
                 SectorConveyorLink link = SectorConveyorManager.get().getLinkForPort(sec, isSender, b.portNumber);
                 if(link == null){
-                    return prefix + " · 未配对 (前往资源视野绑定)";
+                    return prefix + (isSender ? " · 未配对 (点击配置绑定)" : " · 未配对");
                 }
                 int peerSecId = isSender ? link.receiverSectorId : link.senderSectorId;
                 int peerPort = isSender ? link.receiverPortNumber : link.senderPortNumber;
@@ -254,6 +257,34 @@ public class SectorConveyorPort extends Block{
         private float releaseCarry = 0f;
         /** Alternates between the 2 front-center output tiles on 4x4 Senior Receivers. */
         private int outputSlotCursor = 0;
+
+        @Override
+        public Cursor getCursor(){
+            return !isSender || !state.isCampaign() || !state.hasSector() ? SystemCursor.arrow : super.getCursor();
+        }
+
+        @Override
+        public boolean shouldShowConfigure(Player player){
+            return isSender && state.isCampaign() && state.hasSector();
+        }
+
+        @Override
+        public void buildConfiguration(Table table){
+            if(!isSender || !state.isCampaign() || !state.hasSector() || team != state.rules.defaultTeam){
+                deselect();
+                return;
+            }
+            ensureRegistered();
+            final int senderPort = portNumber;
+            final Sector sourceSector = state.getSector();
+
+            table.button(Icon.upOpen, Styles.cleari, () -> {
+                if(senderPort > 0 && sourceSector != null){
+                    ui.planet.showConveyorSelect(sourceSector, senderPort);
+                }
+                deselect();
+            }).size(40f);
+        }
 
         @Override
         public void created(){

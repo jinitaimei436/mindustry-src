@@ -447,9 +447,11 @@ public class SerpuloTechTree{
 
                 node(additiveReconstructor, Seq.with(new SectorComplete(fungalPass)), () -> {
                     node(multiplicativeReconstructor, Seq.with(new SectorComplete(frontier)), () -> {
+                        node(lowTroopLaunchPad);
                         node(exponentialReconstructor, Seq.with(new SectorComplete(overgrowth)), () -> {
+                            node(highTroopLaunchPad);
                             node(tetrativeReconstructor, Seq.with(new SectorComplete(mycelialBastion)), () -> {
-
+                                node(specialTroopLaunchPad);
                             });
                         });
                     });

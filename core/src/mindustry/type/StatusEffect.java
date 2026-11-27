@@ -27,6 +27,10 @@ public class StatusEffect extends UnlockableContent{
     public float buildSpeedMultiplier = 1f;
     /** Unit drag multiplier. */
     public float dragMultiplier = 1f;
+    /** Unit healing received multiplier (1f = normal, 0.5f = -50% healing). */
+    public float healMultiplier = 1f;
+    /** Unit effective armor multiplier (1f = normal, 0.8f = -20% armor). */
+    public float armorMultiplier = 1f;
     /** Damage dealt upon transition to an affinity. */
     public float transitionDamage = 0f;
     /** Unit weapon(s) disabled. */

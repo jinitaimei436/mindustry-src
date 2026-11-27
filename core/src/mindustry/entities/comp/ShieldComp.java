@@ -11,7 +11,7 @@ import mindustry.type.*;
 
 @Component
 abstract class ShieldComp implements Healthc, Posc{
-    @Import float health, hitTime, x, y, healthMultiplier, armorOverride;
+    @Import float health, hitTime, x, y, healthMultiplier, armorOverride, statusArmorMultiplier;
     @Import boolean dead;
     @Import Team team;
     @Import UnitType type;
@@ -27,7 +27,8 @@ abstract class ShieldComp implements Healthc, Posc{
     @Override
     public void damage(float amount){
         //apply armor and scaling effects
-        rawDamage(Damage.applyArmor(amount, armorOverride >= 0f ? armorOverride : armor) / healthMultiplier / Vars.state.rules.unitHealth(team));
+        float effectiveArmor = (armorOverride >= 0f ? armorOverride : armor) * statusArmorMultiplier;
+        rawDamage(Damage.applyArmor(amount, effectiveArmor) / healthMultiplier / Vars.state.rules.unitHealth(team));
     }
 
     @Replace
@@ -47,7 +48,8 @@ abstract class ShieldComp implements Healthc, Posc{
     public void damageArmorMult(float amount, float armorMult, boolean withEffect){
         float pre = hitTime;
 
-        rawDamage(Damage.applyArmor(amount, armorOverride >= 0f ? armorOverride * armorMult : armor * armorMult) / healthMultiplier / Vars.state.rules.unitHealth(team));
+        float effectiveArmor = (armorOverride >= 0f ? armorOverride * armorMult : armor * armorMult) * statusArmorMultiplier;
+        rawDamage(Damage.applyArmor(amount, effectiveArmor) / healthMultiplier / Vars.state.rules.unitHealth(team));
 
         if(!withEffect){
             hitTime = pre;

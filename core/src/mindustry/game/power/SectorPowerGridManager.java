@@ -9,6 +9,7 @@ import mindustry.game.*;
 import mindustry.game.EventType.*;
 import mindustry.game.coop.*;
 import mindustry.game.power.SectorPowerGridMath.*;
+import mindustry.game.strategy.core.*;
 import mindustry.gen.*;
 import mindustry.type.*;
 import mindustry.world.*;
@@ -64,6 +65,9 @@ public class SectorPowerGridManager{
 
         Events.on(SaveWriteEvent.class, e -> {
             if(state != null && state.isCampaign()){
+                if(state.hasSector() && state.getSector().hasBase() && !hasHub(state.getSector())){
+                    captureLiveLocalPower(state.getSector());
+                }
                 saveIfDirty(true);
             }
         });
@@ -155,6 +159,9 @@ public class SectorPowerGridManager{
 
     public void onSectorLost(@Nullable Sector sector){
         if(sector == null) return;
+        if(getTopology(sector.planet).removeLocalSnapshot(sector.id)){
+            dirty = true;
+        }
         onHubRemoved(sector);
     }
 
@@ -204,7 +211,82 @@ public class SectorPowerGridManager{
             onHubActive(sec, build);
         }else{
             onHubRemoved(sec);
+            captureLiveLocalPower(sec);
         }
+    }
+
+    /**
+     * Aggregates all unique local PowerGraphs belonging to the default team in the currently
+     * loaded foreground sector and persists a lightweight snapshot for non-hub Power View display.
+     */
+    public LocalPowerSnapshot captureLiveLocalPower(@Nullable Sector sector){
+        if(sector == null || !sector.hasBase()){
+            return new LocalPowerSnapshot(sector == null ? -1 : sector.id, 0f, 0f, 0f, 0f);
+        }
+        PlanetPowerTopology topo = getTopology(sector.planet);
+        LocalPowerSnapshot existing = topo.getLocalSnapshot(sector.id);
+        if(!sector.isBeingPlayed() || state == null || state.rules == null || state.rules.defaultTeam == null){
+            return existing != null ? existing : new LocalPowerSnapshot(sector.id, 0f, 0f, 0f, 0f);
+        }
+
+        IntSet seenGraphs = new IntSet();
+        float prodSec = 0f;
+        float needSec = 0f;
+        float stored = 0f;
+        float cap = 0f;
+
+        Seq<Building> builds = state.rules.defaultTeam.data().buildings;
+        for(int i = 0; i < builds.size; i++){
+            Building b = builds.get(i);
+            if(b == null || !b.isValid() || b.power == null || b.power.graph == null) continue;
+            PowerGraph g = b.power.graph;
+            if(seenGraphs.add(g.getID())){
+                prodSec += Math.max(0f, g.getLastScaledPowerIn()) * 60f;
+                needSec += Math.max(0f, g.getLastScaledPowerOut()) * 60f;
+                stored += Math.max(0f, g.getBatteryStored());
+                cap += Math.max(0f, g.getTotalBatteryCapacity());
+            }
+        }
+
+        // Preserve persisted prod/need on tick 0 right after loading before PowerGraph.update() runs
+        if(prodSec <= 0.0001f && needSec <= 0.0001f && existing != null && seenGraphs.size > 0){
+            prodSec = existing.producedPerSec;
+            needSec = existing.neededPerSec;
+        }
+
+        topo.updateLocalSnapshot(sector.id, prodSec, needSec, stored, cap);
+        dirty = true;
+        return topo.getLocalSnapshot(sector.id);
+    }
+
+    /**
+     * Returns local power metrics (power/sec & battery energy) for any captured sector without
+     * requiring a Surge Sector Power Hub. Foreground sectors sample live PowerGraphs; background
+     * sectors combine live solved StrategySimulationEngine power with persisted battery snapshots.
+     */
+    public LocalPowerSnapshot getLocalPowerSnapshot(@Nullable Sector sector){
+        if(sector == null || !sector.hasBase()){
+            return new LocalPowerSnapshot(sector == null ? -1 : sector.id, 0f, 0f, 0f, 0f);
+        }
+        if(sector.isBeingPlayed()){
+            return captureLiveLocalPower(sector);
+        }
+
+        LocalPowerSnapshot snap = getTopology(sector.planet).getLocalSnapshot(sector.id);
+        SectorStrategyProfile profile = null;
+        if(universe != null && universe.strategy != null && sector.planet != null){
+            profile = universe.strategy.getEngine(sector.planet).sectors.get(sector.id);
+        }
+        if(profile == null && sector.info != null){
+            profile = sector.info.strategyProfile;
+        }
+
+        boolean hasProfileNodes = profile != null && !profile.nodes.isEmpty();
+        float prodSec = hasProfileNodes ? profile.solvedLocalPowerProd : (snap != null ? snap.producedPerSec : 0f);
+        float needSec = hasProfileNodes ? profile.solvedLocalPowerCons : (snap != null ? snap.neededPerSec : 0f);
+        float stored = snap != null ? snap.batteryStored : 0f;
+        float cap = snap != null ? snap.batteryCapacity : 0f;
+        return new LocalPowerSnapshot(sector.id, prodSec, needSec, stored, cap);
     }
 
     // ==================== LINKING & QUERIES ====================

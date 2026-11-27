@@ -22,6 +22,7 @@ import mindustry.game.Objectives.*;
 import mindustry.game.Saves.*;
 import mindustry.game.Teams.*;
 import mindustry.game.coop.*;
+import mindustry.game.troops.*;
 import mindustry.gen.*;
 import mindustry.input.*;
 import mindustry.io.*;
@@ -463,8 +464,9 @@ public class Control implements ApplicationListener, Loadable{
             sector.planet.setLastSector(sector);
 
             boolean clearSave = sector.planet.clearSectorOnLose || sector.planet.campaignRules.clearSectorOnLose;
+            boolean beachheadEntry = SectorTroopAirliftManager.get().isEnteringCorelessBeachhead(sector);
 
-            if(slot != null && !clearSectors && (!clearSave || sector.info.hasCore)){
+            if(slot != null && !clearSectors && (!clearSave || sector.info.hasCore || beachheadEntry)){
 
                 try{
                     boolean hadNoCore = !sector.info.hasCore;
@@ -476,7 +478,8 @@ public class Control implements ApplicationListener, Loadable{
                     state.rules.cloudColor = sector.planet.landCloudColor;
 
                     //if there is no base, simulate a new game and place the right loadout at the spawn position
-                    if(state.rules.defaultTeam.cores().isEmpty() || hadNoCore){
+                    //(skip reset when entering an active V3.9 coreless beachhead sector)
+                    if(!beachheadEntry && (state.rules.defaultTeam.cores().isEmpty() || hadNoCore)){
 
                         //don't carry over the spawn position and plans if the sector preset name or map size changed
                         if(clearSave || sector.info.spawnPosition == 0 || !sector.info.sectorDataMatches(sector)){
@@ -564,6 +567,9 @@ public class Control implements ApplicationListener, Loadable{
                         Events.fire(new RulesLoadEvent(state.rules, true));
                         state.set(State.playing);
                         reloader.end();
+                        if(beachheadEntry){
+                            SectorTroopAirliftManager.get().onSectorEnteredForeground(sector);
+                        }
                         if(net.server()){
                             MultiSectorCoordinator.get().onHostEnteredSector(sector);
                         }
@@ -577,6 +583,25 @@ public class Control implements ApplicationListener, Loadable{
                     playSector(origin, sector);
                 }
                 ui.planet.hide();
+            }else if(beachheadEntry){
+                // V3.9 coreless beachhead fresh entry: defer drop until auto-placed friendly core is stripped
+                SectorTroopAirliftManager.get().setDeferForegroundEntry(true);
+                try{
+                    playNewSector(origin, sector, reloader, new WorldParams(), () -> {
+                        Seq<CoreBuild> placedCores = state.rules.defaultTeam.cores().copy();
+                        for(int i = 0; i < placedCores.size; i++){
+                            CoreBuild c = placedCores.get(i);
+                            if(c != null && c.tile != null){
+                                c.tile.remove();
+                            }
+                        }
+                        sector.info.hasCore = false;
+                        SectorTroopAirliftManager.get().setDeferForegroundEntry(false);
+                        SectorTroopAirliftManager.get().onSectorEnteredForeground(sector);
+                    });
+                }finally{
+                    SectorTroopAirliftManager.get().setDeferForegroundEntry(false);
+                }
             }else{
                 playNewSector(origin, sector, reloader);
             }

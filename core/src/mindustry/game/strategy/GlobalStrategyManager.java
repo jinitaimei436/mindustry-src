@@ -44,6 +44,7 @@ public class GlobalStrategyManager{
         this.policy = policy;
         registerExtension(new CrossSectorPowerExtension());
         registerExtension(new CrossSectorConveyorExtension());
+        registerExtension(new CrossSectorTroopExtension());
     }
 
     /** Registers a pluggable cross-sector extension (deduplicated by extensionId). */

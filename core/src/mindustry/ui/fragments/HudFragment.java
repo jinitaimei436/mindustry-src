@@ -24,6 +24,8 @@ import mindustry.ctype.*;
 import mindustry.entities.abilities.*;
 import mindustry.game.EventType.*;
 import mindustry.game.*;
+import mindustry.game.troops.*;
+import mindustry.game.troops.TroopAirliftMath.*;
 import mindustry.gen.*;
 import mindustry.graphics.*;
 import mindustry.input.*;
@@ -622,6 +624,59 @@ public class HudFragment{
 
                     return (coreAttackTime -= Time.delta) > 0;
                 })
+                .touchable(Touchable.disabled)
+                .fillX().row();
+
+                // V3.9: 60s incoming cross-sector troop airlift arrival countdown banner
+                // Reserved UI & animation slots: "ui-airlift-banner-bg", "ui-airlift-banner-anim-0..N"
+                c.collapser(top -> {
+                    Drawable bannerBg = TroopAirliftAssets.drawableOrFallback(TroopAirliftAssets.UI_AIRLIFT_BANNER_BG, Styles.black6);
+                    top.background(bannerBg).pad(8f);
+                    top.left();
+
+                    TextureRegion[] bannerAnimFrames = TroopAirliftAssets.loadFrameSequence(TroopAirliftAssets.UI_AIRLIFT_BANNER_ANIM);
+                    if(bannerAnimFrames.length > 0){
+                        TextureRegionDrawable animDraw = new TextureRegionDrawable(bannerAnimFrames[0]);
+                        Image animImg = new Image(animDraw);
+                        animImg.update(() -> {
+                            TextureRegion cur = TroopAirliftAssets.pickLoopFrame(bannerAnimFrames, Time.time / 60f, 10f);
+                            if(cur != null) animDraw.setRegion(cur);
+                        });
+                        top.add(animImg).size(24f).padRight(8f);
+                    }else{
+                        top.image(Icon.upOpen).size(20f).padRight(8f)
+                            .update(img -> img.color.set(Pal.accent).lerp(Color.white, Mathf.absin(Time.time, 3f, 1f)));
+                    }
+
+                    top.label(() -> {
+                        if(!state.isCampaign() || !state.hasSector()) return "";
+                        Sector sec = state.getSector();
+                        java.util.ArrayList<TroopAirliftMission> incoming = SectorTroopAirliftManager.get().getIncomingBannerMissions(sec);
+                        if(incoming.isEmpty()) return "";
+                        TroopAirliftMission first = incoming.get(0);
+                        String originName = (sec.planet != null && first.originSectorId >= 0 && first.originSectorId < sec.planet.sectors.size)
+                            ? sec.planet.sectors.get(first.originSectorId).name() : ("区块#" + first.originSectorId);
+                        String modeTag = first.launchMode == LaunchMode.BEACHHEAD ? "[scarlet]抢滩[]" : "[#84f491]增援[]";
+                        int secs = Math.max(0, (int)Math.ceil(first.remainingSeconds()));
+                        String extra = incoming.size() > 1 ? (" [lightgray](+" + (incoming.size() - 1) + "批)[]") : "";
+                        return modeTag + " 来自 " + originName + "（" + first.livingUnitCount() + "台/" + first.livingCp() + "点）预计 [accent]" + secs + "秒[] 抵达" + extra;
+                    }).style(Styles.outlineLabel);
+                }, true, () -> {
+                    if(state.isMenu() || !state.isCampaign() || !state.hasSector() || !shown()) return false;
+                    return !SectorTroopAirliftManager.get().getIncomingBannerMissions(state.getSector()).isEmpty();
+                })
+                .touchable(Touchable.disabled)
+                .fillX().row();
+
+                // V3.9: Recent critical troop airlift alert banner (e.g., "编队迷失")
+                // Reserved icon slot: "ui-airlift-lost-icon"
+                c.collapser(top -> {
+                    top.background(Styles.black6).pad(8f);
+                    Drawable lostIcon = TroopAirliftAssets.drawableOrFallback(TroopAirliftAssets.UI_AIRLIFT_LOST_ICON, Icon.warningSmall);
+                    top.image(lostIcon).color(Pal.remove).size(20f).padRight(8f);
+                    top.label(() -> SectorTroopAirliftManager.get().getRecentAlertText())
+                        .color(Color.scarlet).style(Styles.outlineLabel);
+                }, true, () -> !state.isMenu() && shown() && !SectorTroopAirliftManager.get().getRecentAlertText().isEmpty())
                 .touchable(Touchable.disabled)
                 .fillX().row();
             }).row();

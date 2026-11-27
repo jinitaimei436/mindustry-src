@@ -14,6 +14,7 @@ import mindustry.entities.*;
 import mindustry.game.EventType.*;
 import mindustry.game.*;
 import mindustry.game.Teams.*;
+import mindustry.game.troops.*;
 import mindustry.gen.*;
 import mindustry.maps.*;
 import mindustry.type.*;
@@ -82,7 +83,8 @@ public class Logic implements ApplicationListener{
 
                     state.getSector().planet.applyRules(state.rules);
 
-                    info.hasCore = true;
+                    info.hasCore = state.rules.defaultTeam.cores().any()
+                        || !SectorTroopAirliftManager.get().shouldAllowCorelessBeachheadSurvival();
 
                     state.rules.sector.saveInfo();
                 }
@@ -330,8 +332,9 @@ public class Logic implements ApplicationListener{
     private void checkGameState(){
         //campaign maps do not have a 'win' state!
         if(state.isCampaign()){
-            //gameover only when cores are dead
-            if(state.teams.playerCores().size == 0 && !state.gameOver){
+            //gameover only when cores are dead (except active V3.9 coreless beachhead with living/pending troops)
+            if(state.teams.playerCores().size == 0 && !state.gameOver
+                && !SectorTroopAirliftManager.get().shouldAllowCorelessBeachheadSurvival()){
                 state.gameOver = true;
                 Events.fire(new GameOverEvent(state.rules.waveTeam));
             }

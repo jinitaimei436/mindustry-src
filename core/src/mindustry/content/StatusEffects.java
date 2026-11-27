@@ -11,7 +11,7 @@ import mindustry.type.*;
 import static mindustry.Vars.*;
 
 public class StatusEffects{
-    public static StatusEffect none, burning, freezing, unmoving, slow, fast, wet, muddy, melting, sapped, tarred, overdrive, overclock, shielded, shocked, blasted, corroded, boss, sporeSlowed, disarmed, electrified, invincible, dynamic;
+    public static StatusEffect none, burning, freezing, unmoving, slow, fast, wet, muddy, melting, sapped, tarred, overdrive, overclock, shielded, shocked, blasted, corroded, boss, sporeSlowed, disarmed, electrified, invincible, dynamic, landingDeploy, orbitalTrauma;
 
     public static void load(){
 
@@ -217,5 +217,45 @@ public class StatusEffects{
             dynamic = true;
             permanent = true;
         }};
+
+        // V3.9 Cross-Sector Troop Airlift: 4s landing deployment debuff (speed -70%, disarm).
+        // Reserved custom icon slot: "status-landing-deploy".
+        landingDeploy = new StatusEffect("landing-deploy"){{
+            localizedName = "着陆展开";
+            description = "空降着陆缓冲期：移动速度降低 70%，暂时无法开火。";
+            color = Color.valueOf("ffd37f");
+            speedMultiplier = 0.3f;
+            disarm = true;
+            effect = Fx.smokePuff;
+            effectChance = 0.08f;
+        }
+            @Override
+            public void loadIcon(){
+                super.loadIcon();
+                if(!Core.atlas.has("status-" + name) && !Core.atlas.has(name)){
+                    fullIcon = uiIcon = Core.atlas.find("status-slow", Core.atlas.find("clear"));
+                }
+            }
+        };
+
+        // V3.9 Cross-Sector Troop Airlift: 45s orbital AA trauma debuff (heal -50%, armor -20%).
+        // Reserved custom icon slot: "status-orbital-trauma".
+        orbitalTrauma = new StatusEffect("orbital-trauma"){{
+            localizedName = "轨道受创";
+            description = "跨区块防空拦截造成的装甲与结构损伤：受治疗效率降低 50%，有效护甲降低 20%。";
+            color = Color.valueOf("ff6b6b");
+            healMultiplier = 0.5f;
+            armorMultiplier = 0.8f;
+            effect = Fx.smoke;
+            effectChance = 0.07f;
+        }
+            @Override
+            public void loadIcon(){
+                super.loadIcon();
+                if(!Core.atlas.has("status-" + name) && !Core.atlas.has(name)){
+                    fullIcon = uiIcon = Core.atlas.find("status-sapped", Core.atlas.find("clear"));
+                }
+            }
+        };
     }
 }

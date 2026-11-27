@@ -11,6 +11,7 @@ import mindustry.game.coop.*;
 import mindustry.game.logistics.*;
 import mindustry.game.power.*;
 import mindustry.game.strategy.*;
+import mindustry.game.troops.*;
 import mindustry.gen.*;
 import mindustry.type.*;
 import mindustry.world.blocks.storage.*;
@@ -33,6 +34,7 @@ public class Universe{
         load();
         SectorPowerGridManager.get().init();
         SectorConveyorManager.get().init();
+        SectorTroopAirliftManager.get().init();
 
         //update base coverage on capture
         Events.on(SectorCaptureEvent.class, e -> {
@@ -281,6 +283,7 @@ public class Universe{
         strategy.flushDirtySectors();
         SectorPowerGridManager.get().saveIfDirty(false);
         SectorConveyorManager.get().saveIfDirty(false);
+        SectorTroopAirliftManager.get().saveIfDirty(false);
         if(manualSaveDisk){
             Core.settings.manualSave();
         }
@@ -293,6 +296,7 @@ public class Universe{
         strategy.flushDirtySectorsBatched(GlobalStrategyManager.DEFAULT_FLUSH_BATCH_SIZE);
         SectorPowerGridManager.get().saveIfDirty(false);
         SectorConveyorManager.get().saveIfDirty(false);
+        SectorTroopAirliftManager.get().saveIfDirty(false);
         Core.settings.manualSave();
     }
 
